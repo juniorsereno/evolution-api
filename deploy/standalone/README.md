@@ -76,10 +76,22 @@ columns so one long contact name cannot reject an entire batch. Disabling
 When enabled, that enrichment awaits each request instead of launching the whole
 address book concurrently.
 Keep `shouldSyncHistoryMessage` explicit: the pinned Baileys default excludes
-`FULL` payloads. For full history, the official Baileys documentation recommends
-the macOS Desktop browser profile as well as `syncFullHistory=true`. Apply that
-profile before the first pairing; an existing session may require a fresh QR
-scan to receive an initial batch that was rejected by the old schema.
+`FULL` payloads. The Windows Desktop profile requires the official
+`WIN_HYBRID` fix, pinned by the full Baileys commit
+`0af2386292907f7d9742d8d41f830d8c48208fa1`. Its production delta from rc14 is
+one line. `Ubuntu Desktop` still selects `WEB_BROWSER`; it does not enable the
+full-history subplatform. Keep `syncFullHistory=true` and configure Windows
+Desktop before pairing. Reconnect updates the login profile, but initial
+full-sync device properties are sent only during registration. An existing
+session may therefore need a fresh QR scan. WhatsApp still controls the
+available history; a 90-day filter is not proof of 90-day delivery.
+
+History identities are resolved through the session's Baileys LID mapping or a
+verified phone alternate. Unresolved LIDs stay in Evolution storage and never
+become fabricated phone numbers. Contact names use history metadata or inbound
+push names, preserving existing Chatwoot names and avoiding the account owner's
+outgoing push name. Use verified mappings and account/inbox-scoped evidence to
+repair older fabricated records; do not infer a phone from LID digits.
 
 The runtime regressions use a separate disposable `evolution_runtime_test`
 database migrated with the Evolution schema. After building the production
