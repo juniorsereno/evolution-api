@@ -40,7 +40,7 @@ WITH CASCADED CHECK OPTION;
 
 CREATE VIEW evolution_import.access_tokens WITH (security_barrier = true) AS
 SELECT t.owner_type, t.owner_id, t.token FROM public.access_tokens t
-WHERE t.owner_type = 'User' AND EXISTS (
+WHERE t.owner_type = 'User' AND t.owner_id = :api_user_id AND EXISTS (
   SELECT 1 FROM public.account_users au
   WHERE au.user_id = t.owner_id AND au.account_id = :account_id AND au.role = 1
 );

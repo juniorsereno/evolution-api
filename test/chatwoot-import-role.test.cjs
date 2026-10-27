@@ -24,7 +24,7 @@ before(async () => {
     INSERT INTO contacts (id,name,account_id,created_at,updated_at) VALUES (99999,'Foreign contact',7,NOW(),NOW());`);
   execFileSync('docker', ['exec', '-i', process.env.CHATWOOT_TEST_CONTAINER || 'evolution-import-test',
     'psql', '-U', 'postgres', '-d', 'evolution_import_test',
-    '-v', 'import_role=evolution_import_test_role', '-v', 'import_password=synthetic-import-only', '-v', 'account_id=6'], {
+    '-v', 'import_role=evolution_import_test_role', '-v', 'import_password=synthetic-import-only', '-v', 'account_id=6', '-v', 'api_user_id=1001'], {
     input: readFileSync('deploy/standalone/chatwoot-import-role.sql'), stdio: ['pipe', 'pipe', 'pipe'],
   });
   const restrictedUri = new URL(adminUri);

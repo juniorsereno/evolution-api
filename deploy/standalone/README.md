@@ -13,9 +13,10 @@ webhook to `http://vartana-evolution:8080/chatwoot/webhook/<instance-name>`.
 Do not expose that private webhook through another reverse proxy.
 
 Use `chatwoot-import-role.sql` to create a non-superuser role and account-filtered
-updatable views. Pass the approved `account_id`, `import_role` and a random
+updatable views. Pass the approved `account_id`, `api_user_id`, `import_role` and a random
 `import_password` to psql without logging the password. The role can read only
-the permitted account and its administrators' tokens. It inserts through views
+the permitted account and the selected administrator's token. Select an
+administrator who belongs only to that account. It inserts through views
 with `CHECK OPTION`; direct access to public tables is denied. Its search path
 selects those views before `public`. Only the required ID sequences are granted.
 The SQL is additive and runs in a transaction. It does not modify existing tables
