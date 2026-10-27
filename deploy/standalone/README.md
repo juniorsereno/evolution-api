@@ -77,9 +77,15 @@ When enabled, that enrichment awaits each request instead of launching the whole
 address book concurrently.
 Keep `shouldSyncHistoryMessage` explicit: the pinned Baileys default excludes
 `FULL` payloads. The Windows Desktop profile requires the official
-`WIN_HYBRID` fix, pinned by the full Baileys commit
-`0af2386292907f7d9742d8d41f830d8c48208fa1`. Its production delta from rc14 is
-one line. `Ubuntu Desktop` still selects `WEB_BROWSER`; it does not enable the
+`WIN_HYBRID` fix. The Baileys dependency is pinned to the controlled fork commit
+`f466064bb1760d6a10f1b3541806e47f93f09d82`, based on official
+`0af2386292907f7d9742d8d41f830d8c48208fa1` (rc14 plus the Windows fix).
+It additionally backports only the signature verification correction from
+upstream commit `d0dd00d5f9b502646c3f12704825b2d19af4e229` / PR #2751.
+Valid signatures remain accepted; well-formed invalid signatures now return
+false. Its dependencies, auth storage and protocol types are unchanged. Preserve
+this full immutable pin when integrating other upstream changes.
+`Ubuntu Desktop` still selects `WEB_BROWSER`; it does not enable the
 full-history subplatform. Keep `syncFullHistory=true` and configure Windows
 Desktop before pairing. Reconnect updates the login profile, but initial
 full-sync device properties are sent only during registration. An existing
