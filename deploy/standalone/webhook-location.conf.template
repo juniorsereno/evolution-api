@@ -1,0 +1,13 @@
+# Render WEBHOOK_TOKEN from a random 256-bit secret. Never publish the rendered file.
+location = /hooks/cnm/__WEBHOOK_TOKEN__ {
+    include /etc/nginx/snippets/evolution-cloudflare-realip.conf;
+    allow 135.181.101.28;
+    allow 127.0.0.1;
+    deny all;
+    access_log off;
+    proxy_pass http://127.0.0.1:3400/chatwoot/webhook/cnm-whatsapp-web;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 60s;
+}

@@ -10,9 +10,15 @@ have separate persistent volumes. Only the API joins the existing Chatwoot
 network. The `nginx.conf` template needs a valid TLS certificate before release.
 The Chatwoot hostname resolves to the Docker host only inside this API container.
 Requests keep HTTPS and certificate validation while avoiding the public CDN.
-It denies the unsigned Chatwoot webhook on the public domain. Set the API inbox
-webhook to `http://vartana-evolution:8080/chatwoot/webhook/<instance-name>`.
-Do not expose that private webhook through another reverse proxy.
+It denies the unsigned native Chatwoot webhook on the public domain. Chatwoot's
+SafeFetch rejects private network destinations. Render `webhook-location.conf.template`
+with a random 256-bit secret and include it in the HTTPS server. The location
+accepts only the VPS origin IP, restores visitor IPs only from official Cloudflare
+ranges, and does not write its secret path to the access log. Keep the rendered
+file private and set the inbox webhook to its HTTPS URL. Do not enable
+`SAFE_FETCH_ALLOW_PRIVATE_NETWORK` globally. The original native route stays denied.
+`CHATWOOT_BOT_CONTACT=true` creates the native connection chat and posts QR images
+there. Send `init` to that control chat to request a fresh code.
 
 Use `chatwoot-import-role.sql` to create a non-superuser role and account-filtered
 updatable views. Pass the approved `account_id`, `api_user_id`, `import_role` and a random
