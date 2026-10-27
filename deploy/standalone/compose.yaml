@@ -48,6 +48,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a database password}
     volumes:
       - postgres:/var/lib/postgresql/data
+    networks:
+      default:
+        aliases:
+          - evolution-postgres
     mem_limit: 512m
     cpus: 0.5
     logging: *logging
@@ -68,6 +72,10 @@ services:
       - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD" --maxmemory 192mb --maxmemory-policy noeviction
     volumes:
       - redis:/data
+    networks:
+      default:
+        aliases:
+          - evolution-redis
     mem_limit: 256m
     cpus: 0.5
     logging: *logging
