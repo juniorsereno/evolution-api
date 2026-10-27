@@ -668,6 +668,7 @@ export class BaileysStartupService extends ChannelStartupService {
         return isGroupJid || isBroadcast || isNewsletter;
       },
       syncFullHistory: this.localSettings.syncFullHistory,
+      shouldSyncHistoryMessage: () => true,
       cachedGroupMetadata: this.getGroupMetadataCache,
       userDevicesCache: this.userDevicesCache,
       transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },

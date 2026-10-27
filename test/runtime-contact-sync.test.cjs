@@ -64,7 +64,7 @@ test('finishes contact enrichment with at most one request in flight when import
   assert.equal(updatesFinished, 6);
 });
 
-test('imports each saved initial history batch without waiting for a separate FULL notification', async () => {
+test('imports saved initial and FULL history batches after persistence', async () => {
   const subject = service(false);
   let imported = 0;
   let queued = 0;
@@ -75,14 +75,14 @@ test('imports each saved initial history batch without waiting for a separate FU
       imported++;
     },
   };
-  const batch = (id, progress) => ({
+  const batch = (id, progress, syncType = 0) => ({
     messages: [{ key: { id, fromMe: false, remoteJid: '5511900000000@s.whatsapp.net' },
       message: { conversation: 'Synthetic history' }, messageTimestamp: Math.floor(Date.now() / 1000) }],
-    contacts: [], chats: [], isLatest: false, progress, syncType: 0,
+    contacts: [], chats: [], isLatest: false, progress, syncType,
   });
   await subject.messageHandle['messaging-history.set'](batch('synthetic-partial', 10));
   assert.equal(imported, 1);
-  await subject.messageHandle['messaging-history.set'](batch('synthetic-complete', 100));
+  await subject.messageHandle['messaging-history.set'](batch('synthetic-complete', 100, 2));
   assert.equal(queued, 2);
   assert.equal(imported, 2);
 });

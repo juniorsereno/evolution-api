@@ -75,6 +75,11 @@ columns so one long contact name cannot reject an entire batch. Disabling
 `importContacts` also skips bulk avatar enrichment and Chatwoot contact updates.
 When enabled, that enrichment awaits each request instead of launching the whole
 address book concurrently.
+Keep `shouldSyncHistoryMessage` explicit: the pinned Baileys default excludes
+`FULL` payloads. For full history, the official Baileys documentation recommends
+the macOS Desktop browser profile as well as `syncFullHistory=true`. Apply that
+profile before the first pairing; an existing session may require a fresh QR
+scan to receive an initial batch that was rejected by the old schema.
 
 The runtime regressions use a separate disposable `evolution_runtime_test`
 database migrated with the Evolution schema. After building the production
