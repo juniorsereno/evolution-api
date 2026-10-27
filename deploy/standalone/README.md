@@ -8,6 +8,8 @@ Run `docker compose -f compose.yaml config --quiet`, then `up -d`.
 The API publishes only `127.0.0.1:3400`. PostgreSQL, Redis and WhatsApp sessions
 have separate persistent volumes. Only the API joins the existing Chatwoot
 network. The `nginx.conf` template needs a valid TLS certificate before release.
+The Chatwoot hostname resolves to the Docker host only inside this API container.
+Requests keep HTTPS and certificate validation while avoiding the public CDN.
 It denies the unsigned Chatwoot webhook on the public domain. Set the API inbox
 webhook to `http://vartana-evolution:8080/chatwoot/webhook/<instance-name>`.
 Do not expose that private webhook through another reverse proxy.

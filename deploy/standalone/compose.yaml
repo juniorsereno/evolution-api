@@ -7,6 +7,8 @@ services:
     env_file: .env
     environment:
       NODE_OPTIONS: --max-old-space-size=1024
+    extra_hosts:
+      - '${CHATWOOT_HOSTNAME:?Set the local Chatwoot hostname}:host-gateway'
     ports:
       - 127.0.0.1:3400:8080
     volumes:
