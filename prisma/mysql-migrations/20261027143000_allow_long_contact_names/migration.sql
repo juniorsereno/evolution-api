@@ -1,0 +1,3 @@
+ALTER TABLE `Chat` MODIFY `name` TEXT NULL;
+ALTER TABLE `Contact` MODIFY `pushName` TEXT NULL;
+ALTER TABLE `Message` MODIFY `pushName` TEXT NULL;

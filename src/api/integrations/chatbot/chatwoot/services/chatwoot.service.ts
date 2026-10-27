@@ -2551,14 +2551,6 @@ export class ChatwootService {
     return remoteJid.replace(/:\d+/, '').split('@')[0];
   }
 
-  public startImportHistoryMessages(instance: InstanceDto) {
-    if (!this.isImportHistoryAvailable()) {
-      return;
-    }
-
-    this.createBotMessage(instance, i18next.t('cw.import.startImport'), 'incoming');
-  }
-
   public isImportHistoryAvailable() {
     const uri = this.configService.get<Chatwoot>('CHATWOOT').IMPORT.DATABASE.CONNECTION.URI;
 
@@ -2586,7 +2578,7 @@ export class ChatwootService {
       return;
     }
 
-    this.createBotMessage(instance, i18next.t('cw.import.importingMessages'), 'incoming');
+    await this.createBotMessage(instance, i18next.t('cw.import.importingMessages'), 'incoming');
 
     const totalMessagesImported = await chatwootImport.importHistoryMessages(
       instance,
@@ -2594,13 +2586,13 @@ export class ChatwootService {
       await this.getInbox(instance),
       this.provider,
     );
-    this.updateContactAvatarInRecentConversations(instance);
+    if (this.provider.importContacts) await this.updateContactAvatarInRecentConversations(instance);
 
     const msg = Number.isInteger(totalMessagesImported)
       ? i18next.t('cw.import.messagesImported', { totalMessagesImported })
       : i18next.t('cw.import.messagesException');
 
-    this.createBotMessage(instance, msg, 'incoming');
+    await this.createBotMessage(instance, msg, 'incoming');
 
     return totalMessagesImported;
   }
@@ -2647,9 +2639,9 @@ export class ChatwootService {
         })
       ).reduce((acc: Map<string, ContactModel>, contact: ContactModel) => acc.set(contact.id, contact), new Map());
 
-      recentContacts.forEach(async (contact) => {
+      for (const contact of recentContacts) {
         if (contactsWithProfilePicture.has(contact.identifier)) {
-          client.contacts.update({
+          await client.contacts.update({
             accountId: this.provider.accountId,
             id: contact.id,
             data: {
@@ -2657,7 +2649,7 @@ export class ChatwootService {
             },
           });
         }
-      });
+      }
     } catch (error) {
       this.logger.error(`Error on update avatar in recent conversations: ${error.toString()}`);
     }

@@ -668,9 +668,6 @@ export class BaileysStartupService extends ChannelStartupService {
         return isGroupJid || isBroadcast || isNewsletter;
       },
       syncFullHistory: this.localSettings.syncFullHistory,
-      shouldSyncHistoryMessage: (msg: proto.Message.IHistorySyncNotification) => {
-        return this.historySyncNotification(msg);
-      },
       cachedGroupMetadata: this.getGroupMetadataCache,
       userDevicesCache: this.userDevicesCache,
       transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
@@ -843,14 +840,23 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
-        const updatedContacts = await Promise.all(
-          contacts.map(async (contact) => ({
+        if (
+          this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+          this.localChatwoot?.enabled &&
+          !this.localChatwoot.importContacts
+        ) {
+          return;
+        }
+
+        const updatedContacts = [];
+        for (const contact of contacts) {
+          updatedContacts.push({
             remoteJid: contact.id,
             pushName: contact?.name || contact?.verifiedName || contact.id.split('@')[0],
             profilePicUrl: (await this.profilePicture(contact.id)).profilePictureUrl,
             instanceId: this.instanceId,
-          })),
-        );
+          });
+        }
 
         if (updatedContacts.length > 0) {
           const usersContacts = updatedContacts.filter((c) => c.remoteJid.includes('@s.whatsapp'));
@@ -859,34 +865,29 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           this.sendDataWebhook(Events.CONTACTS_UPDATE, updatedContacts);
-          await Promise.all(
-            updatedContacts.map(async (contact) => {
-              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS) {
-                await this.prismaRepository.contact.updateMany({
-                  where: { remoteJid: contact.remoteJid, instanceId: this.instanceId },
-                  data: { profilePicUrl: contact.profilePicUrl },
-                });
+          for (const contact of updatedContacts) {
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS) {
+              await this.prismaRepository.contact.updateMany({
+                where: { remoteJid: contact.remoteJid, instanceId: this.instanceId },
+                data: { profilePicUrl: contact.profilePicUrl },
+              });
+            }
+
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+              const instance = { instanceName: this.instance.name, instanceId: this.instance.id };
+
+              const findParticipant = await this.chatwootService.findContact(instance, contact.remoteJid.split('@')[0]);
+
+              if (!findParticipant) {
+                continue;
               }
 
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-                const instance = { instanceName: this.instance.name, instanceId: this.instance.id };
-
-                const findParticipant = await this.chatwootService.findContact(
-                  instance,
-                  contact.remoteJid.split('@')[0],
-                );
-
-                if (!findParticipant) {
-                  return;
-                }
-
-                this.chatwootService.updateContact(instance, findParticipant.id, {
-                  name: contact.pushName,
-                  avatar_url: contact.profilePicUrl,
-                });
-              }
-            }),
-          );
+              await this.chatwootService.updateContact(instance, findParticipant.id, {
+                name: contact.pushName,
+                avatar_url: contact.profilePicUrl,
+              });
+            }
+          }
         }
       } catch (error) {
         console.error(error);
@@ -956,14 +957,6 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const date = new Date();
           timestampLimitToImport = new Date(date.setDate(date.getDate() - daysLimitToImport)).getTime() / 1000;
-
-          const maxBatchTimestamp = Math.max(...messages.map((message) => message.messageTimestamp as number));
-
-          const processBatch = maxBatchTimestamp >= timestampLimitToImport;
-
-          if (!processBatch) {
-            return;
-          }
         }
 
         const contactsMap = new Map();
@@ -1061,10 +1054,11 @@ export class BaileysStartupService extends ChannelStartupService {
           this.localChatwoot.importMessages &&
           messagesRaw.length > 0
         ) {
-          this.chatwootService.addHistoryMessages(
-            instance,
-            messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid)),
-          );
+          const messagesToImport = messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid));
+          if (messagesToImport.length > 0) {
+            this.chatwootService.addHistoryMessages(instance, messagesToImport);
+            await this.chatwootService.importHistoryMessages(instance);
+          }
         }
 
         await this.contactHandle['contacts.upsert'](
@@ -2010,36 +2004,6 @@ export class BaileysStartupService extends ChannelStartupService {
         }
       });
     });
-  }
-
-  private historySyncNotification(msg: proto.Message.IHistorySyncNotification) {
-    const instance: InstanceDto = { instanceName: this.instance.name };
-
-    if (
-      this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-      this.localChatwoot?.enabled &&
-      this.localChatwoot.importMessages &&
-      this.isSyncNotificationFromUsedSyncType(msg)
-    ) {
-      if (msg.chunkOrder === 1) {
-        this.chatwootService.startImportHistoryMessages(instance);
-      }
-
-      if (msg.progress === 100) {
-        setTimeout(() => {
-          this.chatwootService.importHistoryMessages(instance);
-        }, 10000);
-      }
-    }
-
-    return true;
-  }
-
-  private isSyncNotificationFromUsedSyncType(msg: proto.Message.IHistorySyncNotification) {
-    return (
-      (this.localSettings.syncFullHistory && msg?.syncType === 2) ||
-      (!this.localSettings.syncFullHistory && msg?.syncType === 3)
-    );
   }
 
   public async profilePicture(number: string) {

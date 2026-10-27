@@ -68,6 +68,21 @@ drop the `evolution_import` schema, then revoke grants with `DROP OWNED BY` and
 drop the dedicated role. These operations preserve imported customer records.
 Views must be reviewed when the target Chatwoot schema changes.
 
+Initial history is imported after each saved batch, including `INITIAL_BOOTSTRAP`.
+It does not depend on a separate `FULL` notification or a timer. The message date
+filter still limits imports to the configured number of days. Names use text
+columns so one long contact name cannot reject an entire batch. Disabling
+`importContacts` also skips bulk avatar enrichment and Chatwoot contact updates.
+When enabled, that enrichment awaits each request instead of launching the whole
+address book concurrently.
+
+The runtime regressions use a separate disposable `evolution_runtime_test`
+database migrated with the Evolution schema. After building the production
+JavaScript, run `node --test test/runtime-contact-sync.test.cjs test/runtime-long-names.test.cjs`
+with that database URI and `DATABASE_SAVE_DATA_CONTACTS=true`,
+`DATABASE_SAVE_DATA_HISTORIC=true`, `DATABASE_SAVE_IS_ON_WHATSAPP=false`,
+`CACHE_REDIS_ENABLED=false`, `CACHE_LOCAL_ENABLED=true`, and `CHATWOOT_ENABLED=true`.
+
 The restricted-role test uses a disposable Docker container named
 `evolution-import-test`, or `CHATWOOT_TEST_CONTAINER`. Run the two files in the
 listed order, not concurrently, because they share the disposable database.
