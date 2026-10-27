@@ -3,6 +3,7 @@ import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/d
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
+import { prepareHistoryContacts } from '@api/integrations/chatbot/chatwoot/utils/history-contact';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -2557,12 +2558,29 @@ export class ChatwootService {
     return uri && uri !== 'postgres://user:password@hostname:port/dbname';
   }
 
-  public addHistoryMessages(instance: InstanceDto, messagesRaw: MessageModel[]) {
+  public async addHistoryMessages(
+    instance: InstanceDto,
+    messagesRaw: MessageModel[],
+    historyContacts: Pick<ContactModel, 'remoteJid' | 'pushName'>[] = [],
+  ) {
     if (!this.isImportHistoryAvailable()) {
       return;
     }
 
-    chatwootImport.addHistoryMessages(instance, messagesRaw);
+    const contacts = await this.prismaRepository.contact.findMany({
+      where: { Instance: { name: instance.instanceName } },
+      select: { remoteJid: true, pushName: true },
+    });
+    const waInstance = this.waMonitor.waInstances[instance.instanceName];
+    const prepared = await prepareHistoryContacts(messagesRaw, [...contacts, ...historyContacts], (lid) =>
+      waInstance.client.signalRepository.lidMapping.getPNForLID(lid),
+    );
+    if (prepared.length < messagesRaw.length) {
+      this.logger.warn(
+        `History retained in Evolution without a verified phone: ${messagesRaw.length - prepared.length}`,
+      );
+    }
+    chatwootImport.addHistoryMessages(instance, prepared);
   }
 
   public addHistoryContacts(instance: InstanceDto, contactsRaw: ContactModel[]) {
@@ -2705,7 +2723,7 @@ export class ChatwootService {
         messagesRaw.push(prepareMessage(m as any));
       }
 
-      this.addHistoryMessages(
+      await this.addHistoryMessages(
         instance,
         messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid)),
       );

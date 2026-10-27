@@ -9,6 +9,8 @@ import { Chatwoot as ChatwootModel, Contact, Message } from '@prisma/client';
 import { proto } from 'baileys';
 import type { Pool, PoolClient } from 'pg';
 
+import { contactName, HistoryMessage, phoneJid } from './history-contact';
+
 type ChatwootUser = {
   user_type: string;
   user_id: number;
@@ -30,7 +32,7 @@ type IWebMessageInfo = Omit<proto.IWebMessageInfo, 'key'> & Partial<Pick<proto.I
 class ChatwootImport {
   private logger = new Logger('ChatwootImport');
   private repositoryMessagesCache = new Map<string, Set<string>>();
-  private historyMessages = new Map<string, Message[]>();
+  private historyMessages = new Map<string, HistoryMessage[]>();
   private historyContacts = new Map<string, Contact[]>();
 
   public getRepositoryMessagesCache(instance: InstanceDto) {
@@ -47,7 +49,7 @@ class ChatwootImport {
     this.repositoryMessagesCache.delete(instance.instanceName);
   }
 
-  public addHistoryMessages(instance: InstanceDto, messagesRaw: Message[]) {
+  public addHistoryMessages(instance: InstanceDto, messagesRaw: HistoryMessage[]) {
     const actualValue = this.historyMessages.has(instance.instanceName)
       ? this.historyMessages.get(instance.instanceName)
       : [];
@@ -250,7 +252,7 @@ class ChatwootImport {
     historical = true,
   ) {
     const pgClient: PoolClient = await postgresClient.getChatwootConnection().connect();
-    let pendingMessages: Message[] = [];
+    let pendingMessages: HistoryMessage[] = [];
     try {
       await pgClient.query('BEGIN');
       await pgClient.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [provider.accountId, inbox.id]);
@@ -316,7 +318,7 @@ class ChatwootImport {
       });
       // processing messages in batch
       const batchSize = 4000;
-      let messagesChunk: Message[] = this.sliceIntoChunks(messagesOrdered, batchSize);
+      let messagesChunk: HistoryMessage[] = this.sliceIntoChunks(messagesOrdered, batchSize);
       while (messagesChunk.length > 0) {
         // Map structure: +552199999999 => Message[]
         const messagesByPhoneNumber = this.createMessagesMapByPhoneNumber(messagesChunk);
@@ -414,7 +416,7 @@ class ChatwootImport {
     provider: ChatwootModel,
     inbox: inbox,
     phoneNumbersWithTimestamp: Map<string, firstLastTimestamp>,
-    messagesByPhoneNumber: Map<string, Message[]>,
+    messagesByPhoneNumber: Map<string, HistoryMessage[]>,
     pgClient: Pool | PoolClient = postgresClient.getChatwootConnection(),
   ): Promise<Map<string, FksChatwoot>> {
     await pgClient.query('SELECT pg_advisory_xact_lock($1::integer, 0)', [provider.accountId]);
@@ -431,21 +433,33 @@ class ChatwootImport {
           bindStr += `$${bindValues.length},`;
 
           bindValues.push(phoneNumberTimestamp.last);
-          return `${bindStr}$${bindValues.length})`;
+          bindStr += `$${bindValues.length},`;
+          const messages = messagesByPhoneNumber.get(phoneNumber);
+          const name =
+            messages.map((message) => contactName(message.contactName)).find(Boolean) ??
+            messages
+              .filter((message) => {
+                const key = message.key;
+                return key && typeof key === 'object' && !Array.isArray(key) && !key.fromMe;
+              })
+              .map((message) => contactName(message.pushName))
+              .find(Boolean);
+          bindValues.push(name ?? phoneNumber);
+          return `${bindStr}$${bindValues.length}::text)`;
         }
       })
       .join(',');
 
     const inputs = `WITH target AS (SELECT $1::integer AS account_id, $2::integer AS inbox_id),
       phone_number AS (
-        SELECT phone_number, created_at::INTEGER, last_activity_at::INTEGER
-        FROM (VALUES ${phoneNumberBind}) AS t (phone_number, created_at, last_activity_at)
+        SELECT phone_number, created_at::INTEGER, last_activity_at::INTEGER, contact_name
+        FROM (VALUES ${phoneNumberBind}) AS t (phone_number, created_at, last_activity_at, contact_name)
       )`;
 
     await pgClient.query(
       `${inputs}
       INSERT INTO contacts (name, phone_number, account_id, identifier, created_at, updated_at)
-      SELECT REPLACE(p.phone_number, '+', ''), p.phone_number, t.account_id,
+      SELECT p.contact_name, p.phone_number, t.account_id,
         CONCAT(REPLACE(p.phone_number, '+', ''), '@s.whatsapp.net'),
         to_timestamp(p.created_at), to_timestamp(p.last_activity_at)
       FROM phone_number p CROSS JOIN target t
@@ -510,23 +524,21 @@ class ChatwootImport {
     }
   }
 
-  public createMessagesMapByPhoneNumber(messages: Message[]): Map<string, Message[]> {
-    return messages.reduce((acc: Map<string, Message[]>, message: Message) => {
-      const key = message?.key as {
-        remoteJid: string;
-      };
-      if (!this.isIgnorePhoneNumber(key?.remoteJid)) {
-        const phoneNumber = key?.remoteJid?.split('@')[0];
-        if (phoneNumber) {
-          const phoneNumberPlus = `+${phoneNumber}`;
-          const messages = acc.has(phoneNumberPlus) ? acc.get(phoneNumberPlus) : [];
-          messages.push(message);
-          acc.set(phoneNumberPlus, messages);
-        }
-      }
-
-      return acc;
-    }, new Map());
+  public createMessagesMapByPhoneNumber(messages: HistoryMessage[]): Map<string, HistoryMessage[]> {
+    const result = new Map<string, HistoryMessage[]>();
+    for (const message of messages) {
+      const key = message.key;
+      if (!key || typeof key !== 'object' || Array.isArray(key)) continue;
+      const jid =
+        phoneJid(key.remoteJid) ??
+        (typeof key.remoteJid === 'string' && key.remoteJid.endsWith('@lid') ? phoneJid(key.remoteJidAlt) : null);
+      if (!jid) continue;
+      const phoneNumber = `+${jid.split('@')[0]}`;
+      const grouped = result.get(phoneNumber) ?? [];
+      grouped.push(message);
+      result.set(phoneNumber, grouped);
+    }
+    return result;
   }
 
   public async getContactsOrderByRecentConversations(

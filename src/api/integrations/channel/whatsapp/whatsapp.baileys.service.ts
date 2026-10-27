@@ -1049,6 +1049,10 @@ export class BaileysStartupService extends ChannelStartupService {
           await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
         }
 
+        await this.contactHandle['contacts.upsert'](
+          contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
+        );
+
         if (
           this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
           this.localChatwoot?.enabled &&
@@ -1057,14 +1061,18 @@ export class BaileysStartupService extends ChannelStartupService {
         ) {
           const messagesToImport = messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid));
           if (messagesToImport.length > 0) {
-            this.chatwootService.addHistoryMessages(instance, messagesToImport);
+            const historyContacts = contacts.flatMap((contact) =>
+              [contact.id, contact.phoneNumber, contact.lid]
+                .filter((jid) => !!jid)
+                .map((jid) => ({
+                  remoteJid: jid,
+                  pushName: contact.name ?? contact.notify ?? contact.verifiedName ?? null,
+                })),
+            );
+            await this.chatwootService.addHistoryMessages(instance, messagesToImport, historyContacts);
             await this.chatwootService.importHistoryMessages(instance);
           }
         }
-
-        await this.contactHandle['contacts.upsert'](
-          contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
-        );
 
         contacts = undefined;
         messages = undefined;

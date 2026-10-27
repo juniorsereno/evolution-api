@@ -86,3 +86,23 @@ test('imports saved initial and FULL history batches after persistence', async (
   assert.equal(queued, 2);
   assert.equal(imported, 2);
 });
+
+
+test('persists recipient names before queueing history for Chatwoot', async () => {
+  const subject = service(false);
+  let queued = false;
+  subject.chatwootService = {
+    addHistoryMessages: async () => {
+      const recipient = await prisma.contact.findFirst({ where: { instanceId: instance.id, remoteJid: '1234567890123456@lid' } });
+      assert.equal(recipient.pushName, 'Synthetic recipient');
+      queued = true;
+    },
+    importHistoryMessages: async () => {},
+  };
+  await subject.messageHandle['messaging-history.set']({
+    messages: [{ key: { id: 'synthetic-name-order', remoteJid: '1234567890123456@lid', fromMe: true },
+      message: { conversation: 'Synthetic outgoing history' }, messageTimestamp: Math.floor(Date.now()/1000) }],
+    contacts: [{ id: '1234567890123456@lid', name: 'Synthetic recipient' }], chats: [], syncType: 0,
+  });
+  assert.equal(queued, true);
+});

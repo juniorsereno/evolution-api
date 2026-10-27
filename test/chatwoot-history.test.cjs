@@ -136,3 +136,35 @@ test('does not treat a database read failure as evidence that a message is absen
   await assert.rejects(chatwootImport.getExistingSourceIds(['one'], { accountId: 'invalid-number', inboxId: 1001 }));
   assert.equal(await count(), 0);
 });
+
+
+test('never creates a phone from an unresolved LID, group or broadcast identifier', async () => {
+  const events = ['1234567890123456@lid', '12345@g.us', 'status@broadcast'].map((remoteJid, i) => ({
+    ...message(`unsupported-${i}`), key: { ...message().key, id: `unsupported-${i}`, remoteJid },
+  }));
+  assert.equal(await run('unresolved-lid', events), 0);
+  assert.equal(Number((await db.query('SELECT count(*) FROM contacts')).rows[0].count), 0);
+});
+
+test('uses the verified alternate phone JID and recipient name without using an outgoing sender name', async () => {
+  const event = message('mapped-lid');
+  event.key.remoteJid = '1234567890123456@lid';
+  event.key.remoteJidAlt = '5511999999999:0@s.whatsapp.net';
+  event.key.fromMe = true;
+  event.pushName = 'Synthetic account owner';
+  event.contactName = 'Synthetic recipient';
+  assert.equal(await run('mapped-lid', [event]), 1);
+  const row = (await db.query('SELECT name, phone_number, identifier FROM contacts')).rows[0];
+  assert.deepEqual(row, { name: 'Synthetic recipient', phone_number: '+5511999999999', identifier: '5511999999999@s.whatsapp.net' });
+});
+
+test('uses inbound push names for new contacts and preserves existing Vartana contact names', async () => {
+  const incoming = message('named-incoming');
+  incoming.pushName = 'Synthetic WhatsApp name';
+  assert.equal(await run('named-incoming', [incoming]), 1);
+  assert.equal((await db.query('SELECT name FROM contacts')).rows[0].name, incoming.pushName);
+  await db.query("UPDATE contacts SET name = 'Vartana edited name'");
+  const next = message('named-next'); next.pushName = 'Changed WhatsApp name';
+  assert.equal(await run('named-next', [next]), 1);
+  assert.equal((await db.query('SELECT name FROM contacts')).rows[0].name, 'Vartana edited name');
+});
