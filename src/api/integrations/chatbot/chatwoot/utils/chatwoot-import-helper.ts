@@ -7,6 +7,7 @@ import { Logger } from '@config/logger.config';
 import { inbox } from '@figuro/chatwoot-sdk';
 import { Chatwoot as ChatwootModel, Contact, Message } from '@prisma/client';
 import { proto } from 'baileys';
+import type { Pool, PoolClient } from 'pg';
 
 type ChatwootUser = {
   user_type: string;
@@ -176,33 +177,68 @@ class ChatwootImport {
     }
   }
 
-  public async getExistingSourceIds(sourceIds: string[], conversationId?: number): Promise<Set<string>> {
-    try {
-      const existingSourceIdsSet = new Set<string>();
+  public async getExistingSourceIds(
+    sourceIds: string[],
+    scope: { accountId: string; inboxId: number },
+    pgClient: Pool | PoolClient = postgresClient.getChatwootConnection(),
+  ): Promise<Set<string>> {
+    const existingSourceIdsSet = new Set<string>();
 
-      if (sourceIds.length === 0) {
-        return existingSourceIdsSet;
-      }
-
-      // Ensure all sourceIds are consistently prefixed with 'WAID:' as required by downstream systems and database queries.
-      const formattedSourceIds = sourceIds.map((sourceId) => `WAID:${sourceId.replace('WAID:', '')}`);
-      const pgClient = postgresClient.getChatwootConnection();
-
-      const params = conversationId ? [formattedSourceIds, conversationId] : [formattedSourceIds];
-
-      const query = conversationId
-        ? 'SELECT source_id FROM messages WHERE source_id = ANY($1) AND conversation_id = $2'
-        : 'SELECT source_id FROM messages WHERE source_id = ANY($1)';
-
-      const result = await pgClient.query(query, params);
-      for (const row of result.rows) {
-        existingSourceIdsSet.add(row.source_id);
-      }
-
+    if (sourceIds.length === 0) {
       return existingSourceIdsSet;
+    }
+
+    // Ensure all sourceIds are consistently prefixed with 'WAID:' as required by downstream systems and database queries.
+    const formattedSourceIds = sourceIds.map((sourceId) => `WAID:${sourceId.replace('WAID:', '')}`);
+    const params = [formattedSourceIds, scope.accountId, scope.inboxId];
+    const query = 'SELECT source_id FROM messages WHERE source_id = ANY($1) AND account_id = $2 AND inbox_id = $3';
+
+    const result = await pgClient.query(query, params);
+    for (const row of result.rows) {
+      existingSourceIdsSet.add(row.source_id);
+    }
+
+    return existingSourceIdsSet;
+  }
+
+  public async createLiveMessage<T>({
+    accountId,
+    conversationDisplayId,
+    sourceId,
+    create,
+  }: {
+    accountId: string;
+    conversationDisplayId: number;
+    sourceId: string;
+    create: () => Promise<T>;
+  }): Promise<T | null> {
+    const pgClient: PoolClient = await postgresClient.getChatwootConnection().connect();
+    try {
+      await pgClient.query('BEGIN');
+      const result = await pgClient.query<{ inbox_id: number }>(
+        'SELECT inbox_id FROM conversations WHERE account_id = $1 AND display_id = $2',
+        [accountId, conversationDisplayId],
+      );
+      const conversation = result.rows[0];
+      if (!conversation) throw new Error('Conversation does not belong to the configured account.');
+
+      await pgClient.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [
+        accountId,
+        conversation.inbox_id,
+      ]);
+      const existing = await this.getExistingSourceIds(
+        [sourceId],
+        { accountId, inboxId: conversation.inbox_id },
+        pgClient,
+      );
+      const message = existing.size > 0 ? null : await create();
+      await pgClient.query('COMMIT');
+      return message;
     } catch (error) {
-      this.logger.error(`Error on getExistingSourceIds: ${error.toString()}`);
-      return new Set<string>();
+      await pgClient.query('ROLLBACK');
+      throw error;
+    } finally {
+      pgClient.release();
     }
   }
 
@@ -211,21 +247,35 @@ class ChatwootImport {
     chatwootService: ChatwootService,
     inbox: inbox,
     provider: ChatwootModel,
+    historical = true,
   ) {
+    const pgClient: PoolClient = await postgresClient.getChatwootConnection().connect();
+    let pendingMessages: Message[] = [];
     try {
-      const pgClient = postgresClient.getChatwootConnection();
+      await pgClient.query('BEGIN');
+      await pgClient.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [provider.accountId, inbox.id]);
 
-      const chatwootUser = await this.getChatwootUser(provider);
+      pendingMessages = this.historyMessages.get(instance.instanceName) || [];
+      this.deleteHistoryMessages(instance);
+      if (pendingMessages.length === 0) {
+        await pgClient.query('COMMIT');
+        return 0;
+      }
+
+      const target = await pgClient.query('SELECT id FROM inboxes WHERE id = $1 AND account_id = $2', [
+        inbox.id,
+        provider.accountId,
+      ]);
+      if (target.rowCount !== 1) throw new Error('Inbox does not belong to the configured account.');
+
+      const chatwootUser = await this.getChatwootUser(provider, pgClient);
       if (!chatwootUser) {
         throw new Error('User not found to import messages.');
       }
 
       let totalMessagesImported = 0;
 
-      let messagesOrdered = this.historyMessages.get(instance.instanceName) || [];
-      if (messagesOrdered.length === 0) {
-        return 0;
-      }
+      let messagesOrdered = [...pendingMessages];
 
       // ordering messages by number and timestamp asc
       messagesOrdered.sort((a, b) => {
@@ -253,8 +303,17 @@ class ChatwootImport {
         });
       });
 
-      const existingSourceIds = await this.getExistingSourceIds(messagesOrdered.map((message: any) => message.key.id));
-      messagesOrdered = messagesOrdered.filter((message: any) => !existingSourceIds.has(message.key.id));
+      const existingSourceIds = await this.getExistingSourceIds(
+        messagesOrdered.map((message: any) => message.key.id),
+        { accountId: provider.accountId, inboxId: inbox.id },
+        pgClient,
+      );
+      messagesOrdered = messagesOrdered.filter((message: any) => {
+        const sourceId = `WAID:${message.key.id}`;
+        if (existingSourceIds.has(sourceId)) return false;
+        existingSourceIds.add(sourceId);
+        return true;
+      });
       // processing messages in batch
       const batchSize = 4000;
       let messagesChunk: Message[] = this.sliceIntoChunks(messagesOrdered, batchSize);
@@ -268,12 +327,14 @@ class ChatwootImport {
             inbox,
             phoneNumbersWithTimestamp,
             messagesByPhoneNumber,
+            pgClient,
           );
 
           // inserting messages in chatwoot db
+          const markHistorical = historical && configService.get<Chatwoot>('CHATWOOT').IMPORT.HISTORICAL_MESSAGES;
           let sqlInsertMsg = `INSERT INTO messages
             (content, processed_message_content, account_id, inbox_id, conversation_id, message_type, private, content_type,
-            sender_type, sender_id, source_id, created_at, updated_at) VALUES `;
+            sender_type, sender_id, source_id, created_at, updated_at${markHistorical ? ', historical' : ''}) VALUES `;
           const bindInsertMsg = [provider.accountId, inbox.id];
 
           messagesByPhoneNumber.forEach((messages: any[], phoneNumber: string) => {
@@ -315,7 +376,8 @@ class ChatwootImport {
               const bindmessageTimestamp = `$${bindInsertMsg.length}`;
 
               sqlInsertMsg += `(${bindContent}, ${bindContent}, $1, $2, ${bindConversationId}, ${bindMessageType}, FALSE, 0,
-                  ${bindSenderType},${bindSenderId},${bindSourceId}, to_timestamp(${bindmessageTimestamp}), to_timestamp(${bindmessageTimestamp})),`;
+                  ${bindSenderType},${bindSenderId},${bindSourceId}, to_timestamp(${bindmessageTimestamp}),
+                  to_timestamp(${bindmessageTimestamp})${markHistorical ? ', TRUE' : ''}),`;
             });
           });
           if (bindInsertMsg.length > 2) {
@@ -328,7 +390,7 @@ class ChatwootImport {
         messagesChunk = this.sliceIntoChunks(messagesOrdered, batchSize);
       }
 
-      this.deleteHistoryMessages(instance);
+      await pgClient.query('COMMIT');
       this.deleteRepositoryMessagesCache(instance);
 
       const providerData: ChatwootDto = {
@@ -336,14 +398,15 @@ class ChatwootImport {
         ignoreJids: Array.isArray(provider.ignoreJids) ? provider.ignoreJids.map((event) => String(event)) : [],
       };
 
-      this.importHistoryContacts(instance, providerData);
+      if (provider.importContacts) await this.importHistoryContacts(instance, providerData);
 
       return totalMessagesImported;
     } catch (error) {
+      await pgClient.query('ROLLBACK');
       this.logger.error(`Error on import history messages: ${error.toString()}`);
-
-      this.deleteHistoryMessages(instance);
-      this.deleteRepositoryMessagesCache(instance);
+      this.addHistoryMessages(instance, pendingMessages);
+    } finally {
+      pgClient.release();
     }
   }
 
@@ -352,9 +415,8 @@ class ChatwootImport {
     inbox: inbox,
     phoneNumbersWithTimestamp: Map<string, firstLastTimestamp>,
     messagesByPhoneNumber: Map<string, Message[]>,
+    pgClient: Pool | PoolClient = postgresClient.getChatwootConnection(),
   ): Promise<Map<string, FksChatwoot>> {
-    const pgClient = postgresClient.getChatwootConnection();
-
     const bindValues = [provider.accountId, inbox.id];
     const phoneNumberBind = Array.from(messagesByPhoneNumber.keys())
       .map((phoneNumber) => {
@@ -383,16 +445,16 @@ class ChatwootImport {
               ),
 
               only_new_phone_number AS (
-                SELECT * FROM phone_number
-                WHERE phone_number NOT IN (
-                  SELECT phone_number
+                SELECT p.* FROM phone_number p
+                WHERE NOT EXISTS (
+                  SELECT 1
                   FROM contacts
                     JOIN contact_inboxes ci ON ci.contact_id = contacts.id AND ci.inbox_id = $2
                     JOIN conversations con ON con.contact_inbox_id = ci.id 
                       AND con.account_id = $1
                       AND con.inbox_id = $2
                       AND con.contact_id = contacts.id
-                  WHERE contacts.account_id = $1
+                  WHERE contacts.account_id = $1 AND contacts.phone_number = p.phone_number
                 )
               ),
 
@@ -427,22 +489,24 @@ class ChatwootImport {
 
               UNION
 
-              SELECT p.phone_number, c.id contact_id, con.id conversation_id
+              (SELECT DISTINCT ON (p.phone_number) p.phone_number, c.id contact_id, con.id conversation_id
                 FROM phone_number p
-              JOIN contacts c ON c.phone_number = p.phone_number
+              JOIN contacts c ON c.phone_number = p.phone_number AND c.account_id = $1
               JOIN contact_inboxes ci ON ci.contact_id = c.id AND ci.inbox_id = $2
               JOIN conversations con ON con.contact_inbox_id = ci.id AND con.account_id = $1
-                AND con.inbox_id = $2 AND con.contact_id = c.id`;
+                AND con.inbox_id = $2 AND con.contact_id = c.id
+              ORDER BY p.phone_number, con.last_activity_at DESC, con.id DESC)`;
 
     const fksFromChatwoot = await pgClient.query(sqlFromChatwoot, bindValues);
 
     return new Map(fksFromChatwoot.rows.map((item: FksChatwoot) => [item.phone_number, item]));
   }
 
-  public async getChatwootUser(provider: ChatwootModel): Promise<ChatwootUser> {
+  public async getChatwootUser(
+    provider: ChatwootModel,
+    pgClient: Pool | PoolClient = postgresClient.getChatwootConnection(),
+  ): Promise<ChatwootUser> {
     try {
-      const pgClient = postgresClient.getChatwootConnection();
-
       const sqlUser = `SELECT owner_type AS user_type, owner_id AS user_id
                          FROM access_tokens
                        WHERE token = $1`;

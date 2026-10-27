@@ -943,21 +943,32 @@ export class ChatwootService {
 
     const sourceReplyId = quotedMsg?.chatwootMessageId || null;
 
-    const message = await client.messages.create({
-      accountId: this.provider.accountId,
-      conversationId: conversationId,
-      data: {
-        content: content,
-        message_type: messageType,
-        attachments: attachments,
-        private: privateMessage || false,
-        source_id: sourceId,
-        content_attributes: {
-          ...replyToIds,
+    const create = () =>
+      client.messages.create({
+        accountId: this.provider.accountId,
+        conversationId: conversationId,
+        data: {
+          content: content,
+          message_type: messageType,
+          attachments: attachments,
+          private: privateMessage || false,
+          source_id: sourceId,
+          content_attributes: {
+            ...replyToIds,
+          },
+          source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
         },
-        source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
-      },
-    });
+      });
+
+    const message =
+      sourceId && this.isImportHistoryAvailable()
+        ? await chatwootImport.createLiveMessage({
+            accountId: this.provider.accountId,
+            conversationDisplayId: conversationId,
+            sourceId,
+            create,
+          })
+        : await create();
 
     if (!message) {
       this.logger.warn('message not found');
@@ -1058,15 +1069,6 @@ export class ChatwootService {
     sourceId?: string,
     quotedMsg?: MessageModel,
   ) {
-    if (sourceId && this.isImportHistoryAvailable()) {
-      const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId], conversationId);
-      if (messageAlreadySaved) {
-        if (messageAlreadySaved.size > 0) {
-          this.logger.warn('Message already saved on chatwoot');
-          return null;
-        }
-      }
-    }
     const data = new FormData();
 
     if (content) {
@@ -1110,9 +1112,17 @@ export class ChatwootService {
     };
 
     try {
-      const { data } = await axios.request(config);
-
-      return data;
+      const create = () => axios.request(config);
+      const response =
+        sourceId && this.isImportHistoryAvailable()
+          ? await chatwootImport.createLiveMessage({
+              accountId: this.provider.accountId,
+              conversationDisplayId: conversationId,
+              sourceId,
+              create,
+            })
+          : await create();
+      return response?.data ?? null;
     } catch (error) {
       this.logger.error(error);
     }
@@ -2704,7 +2714,7 @@ export class ChatwootService {
         messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid)),
       );
 
-      await chatwootImport.importHistoryMessages(instance, this, inbox, this.provider);
+      await chatwootImport.importHistoryMessages(instance, this, inbox, this.provider, false);
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
       waInstance.clearCacheChatwoot();
     } catch {
