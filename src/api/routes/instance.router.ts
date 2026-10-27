@@ -2,8 +2,9 @@ import { RouterBroker } from '@api/abstract/abstract.router';
 import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { instanceController } from '@api/server.module';
 import { ConfigService } from '@config/env.config';
+import { BadRequestException } from '@exceptions';
 import { instanceSchema, presenceOnlySchema } from '@validate/validate.schema';
-import { RequestHandler, Router } from 'express';
+import { Request, RequestHandler, Router } from 'express';
 
 import { HttpStatus } from './index.router';
 
@@ -19,7 +20,7 @@ export class InstanceRouter extends RouterBroker {
           request: req,
           schema: instanceSchema,
           ClassRef: InstanceDto,
-          execute: (instance) => instanceController.createInstance(instance),
+          execute: (_instance, data) => instanceController.createInstance(data),
         });
 
         return res.status(HttpStatus.CREATED).json(response);
@@ -57,12 +58,7 @@ export class InstanceRouter extends RouterBroker {
       .get(this.routerPath('fetchInstances', false), ...guards, async (req, res) => {
         const key = req.get('apikey');
 
-        const response = await this.dataValidate<InstanceDto>({
-          request: req,
-          schema: null,
-          ClassRef: InstanceDto,
-          execute: (instance) => instanceController.fetchInstances(instance, key),
-        });
+        const response = await instanceController.fetchInstances(this.instanceFilters(req), key);
 
         return res.status(HttpStatus.OK).json(response);
       })
@@ -96,6 +92,19 @@ export class InstanceRouter extends RouterBroker {
 
         return res.status(HttpStatus.OK).json(response);
       });
+  }
+
+  private instanceFilters(request: Request): InstanceDto {
+    const filters = new InstanceDto();
+    for (const key of ['instanceName', 'instanceId', 'number'] as const) {
+      const value = request.query[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'string') {
+        throw new BadRequestException(`Query filter '${key}' must be a string.`);
+      }
+      filters[key] = value;
+    }
+    return filters;
   }
 
   public readonly router: Router = Router();
