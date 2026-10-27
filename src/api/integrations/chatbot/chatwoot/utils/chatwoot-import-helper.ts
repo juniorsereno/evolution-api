@@ -417,6 +417,7 @@ class ChatwootImport {
     messagesByPhoneNumber: Map<string, Message[]>,
     pgClient: Pool | PoolClient = postgresClient.getChatwootConnection(),
   ): Promise<Map<string, FksChatwoot>> {
+    await pgClient.query('SELECT pg_advisory_xact_lock($1::integer, 0)', [provider.accountId]);
     const bindValues = [provider.accountId, inbox.id];
     const phoneNumberBind = Array.from(messagesByPhoneNumber.keys())
       .map((phoneNumber) => {
@@ -435,69 +436,61 @@ class ChatwootImport {
       })
       .join(',');
 
-    // select (or insert when necessary) data from tables contacts, contact_inboxes, conversations from chatwoot db
-    const sqlFromChatwoot = `WITH
-              phone_number AS (
-                SELECT phone_number, created_at::INTEGER, last_activity_at::INTEGER FROM (
-                  VALUES 
-                   ${phoneNumberBind}
-                 ) as t (phone_number, created_at, last_activity_at)
-              ),
+    const inputs = `WITH target AS (SELECT $1::integer AS account_id, $2::integer AS inbox_id),
+      phone_number AS (
+        SELECT phone_number, created_at::INTEGER, last_activity_at::INTEGER
+        FROM (VALUES ${phoneNumberBind}) AS t (phone_number, created_at, last_activity_at)
+      )`;
 
-              only_new_phone_number AS (
-                SELECT p.* FROM phone_number p
-                WHERE NOT EXISTS (
-                  SELECT 1
-                  FROM contacts
-                    JOIN contact_inboxes ci ON ci.contact_id = contacts.id AND ci.inbox_id = $2
-                    JOIN conversations con ON con.contact_inbox_id = ci.id 
-                      AND con.account_id = $1
-                      AND con.inbox_id = $2
-                      AND con.contact_id = contacts.id
-                  WHERE contacts.account_id = $1 AND contacts.phone_number = p.phone_number
-                )
-              ),
+    await pgClient.query(
+      `${inputs}
+      INSERT INTO contacts (name, phone_number, account_id, identifier, created_at, updated_at)
+      SELECT REPLACE(p.phone_number, '+', ''), p.phone_number, t.account_id,
+        CONCAT(REPLACE(p.phone_number, '+', ''), '@s.whatsapp.net'),
+        to_timestamp(p.created_at), to_timestamp(p.last_activity_at)
+      FROM phone_number p CROSS JOIN target t
+      WHERE NOT EXISTS (SELECT 1 FROM contacts c WHERE c.account_id = t.account_id AND c.phone_number = p.phone_number)`,
+      bindValues,
+    );
 
-              new_contact AS (
-                INSERT INTO contacts (name, phone_number, account_id, identifier, created_at, updated_at)
-                SELECT REPLACE(p.phone_number, '+', ''), p.phone_number, $1, CONCAT(REPLACE(p.phone_number, '+', ''),
-                  '@s.whatsapp.net'), to_timestamp(p.created_at), to_timestamp(p.last_activity_at)
-                FROM only_new_phone_number AS p
-                ON CONFLICT(identifier, account_id) DO UPDATE SET updated_at = EXCLUDED.updated_at
-                RETURNING id, phone_number, created_at, updated_at
-              ),
+    await pgClient.query(
+      `${inputs}
+      INSERT INTO contact_inboxes (contact_id, inbox_id, source_id, created_at, updated_at)
+      SELECT c.id, t.inbox_id, gen_random_uuid(), c.created_at, c.updated_at
+      FROM phone_number p CROSS JOIN target t
+      JOIN LATERAL (
+        SELECT id, created_at, updated_at FROM contacts
+        WHERE account_id = t.account_id AND phone_number = p.phone_number ORDER BY id LIMIT 1
+      ) c ON TRUE
+      WHERE NOT EXISTS (SELECT 1 FROM contact_inboxes ci WHERE ci.contact_id = c.id AND ci.inbox_id = t.inbox_id)`,
+      bindValues,
+    );
 
-              new_contact_inbox AS (
-                INSERT INTO contact_inboxes (contact_id, inbox_id, source_id, created_at, updated_at)
-                SELECT new_contact.id, $2, gen_random_uuid(), new_contact.created_at, new_contact.updated_at
-                FROM new_contact 
-                RETURNING id, contact_id, created_at, updated_at
-              ),
+    await pgClient.query(
+      `${inputs}
+      INSERT INTO conversations (account_id, inbox_id, status, contact_id, contact_inbox_id,
+        uuid, last_activity_at, created_at, updated_at)
+      SELECT t.account_id, t.inbox_id, 0, c.id, ci.id, gen_random_uuid(),
+        to_timestamp(p.last_activity_at), to_timestamp(p.created_at), to_timestamp(p.last_activity_at)
+      FROM phone_number p CROSS JOIN target t
+      JOIN contacts c ON c.phone_number = p.phone_number AND c.account_id = t.account_id
+      JOIN contact_inboxes ci ON ci.contact_id = c.id AND ci.inbox_id = t.inbox_id
+      WHERE NOT EXISTS (SELECT 1 FROM conversations con
+        WHERE con.account_id = t.account_id AND con.inbox_id = t.inbox_id AND con.contact_inbox_id = ci.id)`,
+      bindValues,
+    );
 
-              new_conversation AS (
-                INSERT INTO conversations (account_id, inbox_id, status, contact_id,
-                  contact_inbox_id, uuid, last_activity_at, created_at, updated_at)
-                SELECT $1, $2, 0, new_contact_inbox.contact_id, new_contact_inbox.id, gen_random_uuid(),
-                  new_contact_inbox.updated_at, new_contact_inbox.created_at, new_contact_inbox.updated_at
-                FROM new_contact_inbox
-                RETURNING id, contact_id
-              )
-
-              SELECT new_contact.phone_number, new_conversation.contact_id, new_conversation.id AS conversation_id
-              FROM new_conversation 
-              JOIN new_contact ON new_conversation.contact_id = new_contact.id
-
-              UNION
-
-              (SELECT DISTINCT ON (p.phone_number) p.phone_number, c.id contact_id, con.id conversation_id
-                FROM phone_number p
-              JOIN contacts c ON c.phone_number = p.phone_number AND c.account_id = $1
-              JOIN contact_inboxes ci ON ci.contact_id = c.id AND ci.inbox_id = $2
-              JOIN conversations con ON con.contact_inbox_id = ci.id AND con.account_id = $1
-                AND con.inbox_id = $2 AND con.contact_id = c.id
-              ORDER BY p.phone_number, con.last_activity_at DESC, con.id DESC)`;
-
-    const fksFromChatwoot = await pgClient.query(sqlFromChatwoot, bindValues);
+    const fksFromChatwoot = await pgClient.query(
+      `${inputs}
+      SELECT DISTINCT ON (p.phone_number) p.phone_number, c.id AS contact_id, con.id AS conversation_id
+      FROM phone_number p CROSS JOIN target t
+      JOIN contacts c ON c.phone_number = p.phone_number AND c.account_id = t.account_id
+      JOIN contact_inboxes ci ON ci.contact_id = c.id AND ci.inbox_id = t.inbox_id
+      JOIN conversations con ON con.contact_inbox_id = ci.id AND con.account_id = t.account_id
+        AND con.inbox_id = t.inbox_id AND con.contact_id = c.id
+      ORDER BY p.phone_number, con.last_activity_at DESC, con.id DESC`,
+      bindValues,
+    );
 
     return new Map(fksFromChatwoot.rows.map((item: FksChatwoot) => [item.phone_number, item]));
   }

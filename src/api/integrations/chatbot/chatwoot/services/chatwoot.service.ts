@@ -1214,7 +1214,9 @@ export class ChatwootService {
         const response = await axios.get(media, {
           responseType: 'arraybuffer',
         });
-        mimeType = response.headers['content-type'];
+        const contentType = response.headers['content-type'];
+        if (typeof contentType !== 'string') throw new Error('Media response is missing a valid Content-Type.');
+        mimeType = contentType;
       }
 
       let type = 'document';
@@ -2224,7 +2226,9 @@ export class ChatwootService {
         if (isAdsMessage) {
           const imgBuffer = await axios.get(adsMessage.thumbnailUrl, { responseType: 'arraybuffer' });
 
-          const extension = mimeTypes.extension(imgBuffer.headers['content-type']);
+          const contentType = imgBuffer.headers['content-type'];
+          if (typeof contentType !== 'string') throw new Error('Media response is missing a valid Content-Type.');
+          const extension = mimeTypes.extension(contentType);
           const mimeType = extension && mimeTypes.lookup(extension);
 
           if (!mimeType) {

@@ -12,14 +12,16 @@ It denies the unsigned Chatwoot webhook on the public domain. Set the API inbox
 webhook to `http://vartana-evolution:8080/chatwoot/webhook/<instance-name>`.
 Do not expose that private webhook through another reverse proxy.
 
-Use a non-superuser database role for `CHATWOOT_IMPORT_DATABASE_CONNECTION_URI`.
-The importer requires `SELECT/INSERT` on contacts, contact_inboxes, conversations
-and messages, `UPDATE(updated_at)` on contacts, `UPDATE(source_id,status,created_at,updated_at)`
-on messages, access to the chosen user's access token, and `USAGE` on the four ID
-sequences plus `conv_dpid_seq_<account-id>`. It also reads the target inbox.
-No schema ownership, deletion, or migration rights are needed. Table grants do
-not restrict rows by tenant. Keep Evolution credentials with trusted operators.
-Do not give the global API key or database credential to customers.
+Use `chatwoot-import-role.sql` to create a non-superuser role and account-filtered
+updatable views. Pass the approved `account_id`, `import_role` and a random
+`import_password` to psql without logging the password. The role can read only
+the permitted account and its administrators' tokens. It inserts through views
+with `CHECK OPTION`; direct access to public tables is denied. Its search path
+selects those views before `public`. Only the required ID sequences are granted.
+The SQL is additive and runs in a transaction. It does not modify existing tables
+or enable RLS on them. Start with one account and a fresh inbox.
+Keep all Evolution credentials with trusted operators. Do not give the global
+API key or database credential to customers.
 
 Leave `importContacts=false`: the legacy agenda importer is separate from the
 message importer and has not been hardened by this change. Message history still
@@ -43,6 +45,7 @@ locked dependencies, generate Prisma with `DATABASE_PROVIDER=postgresql`, then r
 
 ```sh
 node --require tsx/cjs --test test/chatwoot-history.test.cjs
+node --require tsx/cjs --test test/chatwoot-import-role.test.cjs
 npm run lint:check
 npm run build
 docker build -t evolution-api:<full-commit-sha> .
@@ -51,3 +54,11 @@ docker build -t evolution-api:<full-commit-sha> .
 Keep backups of the Evolution database and instance volume before upgrades.
 Rollback selects the previous immutable image and recreates only the API.
 Do not remove its volumes or restore a database as part of an image rollback.
+To remove the database adapter, stop the bridge, remove its inbox webhook,
+drop the `evolution_import` schema, then revoke grants with `DROP OWNED BY` and
+drop the dedicated role. These operations preserve imported customer records.
+Views must be reviewed when the target Chatwoot schema changes.
+
+The restricted-role test uses a disposable Docker container named
+`evolution-import-test`, or `CHATWOOT_TEST_CONTAINER`. Run the two files in the
+listed order, not concurrently, because they share the disposable database.
