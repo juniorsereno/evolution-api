@@ -10,7 +10,7 @@ if (!uri || new URL(uri).pathname !== '/evolution_import_test') {
 }
 const db = new Pool({ connectionString: uri });
 const provider = { accountId: '6', token: 'synthetic-history-token', ignoreJids: [] };
-const service = { getConversationMessage: (message) => message.conversation };
+const service = { getMessageOrigins: async () => [], getConversationMessage: (message) => message.conversation };
 const instance = (name) => ({ instanceName: name });
 const message = (id, content = 'History text') => ({
   key: { id, remoteJid: '5511999999999@s.whatsapp.net', fromMe: false },

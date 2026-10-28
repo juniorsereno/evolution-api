@@ -2,6 +2,7 @@ import { InstanceDto } from '@api/dto/instance.dto';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { ChatwootService } from '@api/integrations/chatbot/chatwoot/services/chatwoot.service';
+import { externalOriginAttributes } from '@api/types/message-origin';
 import { Chatwoot, configService } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { inbox } from '@figuro/chatwoot-sdk';
@@ -275,9 +276,44 @@ class ChatwootImport {
         throw new Error('User not found to import messages.');
       }
 
+      const origins = await chatwootService.getMessageOrigins(
+        instance,
+        pendingMessages.flatMap((message) => {
+          const key = message.key;
+          return key && typeof key === 'object' && !Array.isArray(key) && typeof key.id === 'string' ? [key.id] : [];
+        }),
+      );
+      const originsById = new Map(origins.map((origin) => [origin.messageId, origin]));
+      for (const origin of origins.filter((value) => value.origin === 'chatwoot')) {
+        if (origin.chatwootAccountId !== provider.accountId || origin.chatwootInboxId !== inbox.id) {
+          throw new Error('Message origin does not belong to the configured account and inbox.');
+        }
+        const linked = await pgClient.query(
+          `UPDATE messages SET source_id = COALESCE(source_id, $1) WHERE id = $2 AND account_id = $3 AND inbox_id = $4
+            AND conversation_id = (SELECT id FROM conversations WHERE account_id = $3 AND display_id = $5)
+            `,
+          [
+            'WAID:' + origin.messageId,
+            origin.chatwootMessageId,
+            provider.accountId,
+            inbox.id,
+            origin.chatwootConversationId,
+          ],
+        );
+        if (linked.rowCount !== 1) throw new Error('Original Chatwoot message was not found in the configured inbox.');
+      }
       let totalMessagesImported = 0;
 
-      let messagesOrdered = [...pendingMessages];
+      let messagesOrdered = pendingMessages.filter((message) => {
+        const key = message.key;
+        return !(
+          key &&
+          typeof key === 'object' &&
+          !Array.isArray(key) &&
+          typeof key.id === 'string' &&
+          originsById.get(key.id)?.origin === 'chatwoot'
+        );
+      });
 
       // ordering messages by number and timestamp asc
       messagesOrdered.sort((a, b) => {
@@ -336,7 +372,7 @@ class ChatwootImport {
           const markHistorical = historical && configService.get<Chatwoot>('CHATWOOT').IMPORT.HISTORICAL_MESSAGES;
           let sqlInsertMsg = `INSERT INTO messages
             (content, processed_message_content, account_id, inbox_id, conversation_id, message_type, private, content_type,
-            sender_type, sender_id, source_id, created_at, updated_at${markHistorical ? ', historical' : ''}) VALUES `;
+            sender_type, sender_id, source_id, created_at, updated_at, content_attributes, status${markHistorical ? ', historical' : ''}) VALUES `;
           const bindInsertMsg = [provider.accountId, inbox.id];
 
           messagesByPhoneNumber.forEach((messages: any[], phoneNumber: string) => {
@@ -365,10 +401,10 @@ class ChatwootImport {
               bindInsertMsg.push(message.key.fromMe ? '1' : '0');
               const bindMessageType = `$${bindInsertMsg.length}`;
 
-              bindInsertMsg.push(message.key.fromMe ? chatwootUser.user_type : 'Contact');
+              bindInsertMsg.push(message.key.fromMe ? null : 'Contact');
               const bindSenderType = `$${bindInsertMsg.length}`;
 
-              bindInsertMsg.push(message.key.fromMe ? chatwootUser.user_id : fksChatwoot.contact_id);
+              bindInsertMsg.push(message.key.fromMe ? null : fksChatwoot.contact_id);
               const bindSenderId = `$${bindInsertMsg.length}`;
 
               bindInsertMsg.push('WAID:' + message.key.id);
@@ -377,9 +413,15 @@ class ChatwootImport {
               bindInsertMsg.push(message.messageTimestamp as number);
               const bindmessageTimestamp = `$${bindInsertMsg.length}`;
 
+              const origin = originsById.get(message.key.id);
+              const attributes = externalOriginAttributes(origin);
+              // Rails stores this JSON column through `store ... coder: JSON`, so its value is a JSON string.
+              bindInsertMsg.push(message.key.fromMe ? JSON.stringify(JSON.stringify(attributes)) : null);
+              const bindAttributes = `$${bindInsertMsg.length}`;
+
               sqlInsertMsg += `(${bindContent}, ${bindContent}, $1, $2, ${bindConversationId}, ${bindMessageType}, FALSE, 0,
                   ${bindSenderType},${bindSenderId},${bindSourceId}, to_timestamp(${bindmessageTimestamp}),
-                  to_timestamp(${bindmessageTimestamp})${markHistorical ? ', TRUE' : ''}),`;
+                  to_timestamp(${bindmessageTimestamp}), ${bindAttributes}, ${message.key.fromMe ? 1 : 0}${markHistorical ? ', TRUE' : ''}),`;
             });
           });
           if (bindInsertMsg.length > 2) {

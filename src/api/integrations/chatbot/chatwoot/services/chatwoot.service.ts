@@ -7,6 +7,7 @@ import { prepareHistoryContacts } from '@api/integrations/chatbot/chatwoot/utils
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
+import { ExternalMessageAttributes, externalOriginAttributes, OutboundOrigin } from '@api/types/message-origin';
 import { Events } from '@api/types/wa.types';
 import { Chatwoot, ConfigService, Database, HttpServer } from '@config/env.config';
 import { Logger } from '@config/logger.config';
@@ -20,11 +21,16 @@ import ChatwootClient, {
   inbox,
 } from '@figuro/chatwoot-sdk';
 import { request as chatwootRequest } from '@figuro/chatwoot-sdk/dist/core/request';
-import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageModel } from '@prisma/client';
+import {
+  Chatwoot as ChatwootModel,
+  Contact as ContactModel,
+  Message as MessageModel,
+  MessageOrigin,
+} from '@prisma/client';
 import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
-import { WAMessageContent, WAMessageKey } from 'baileys';
+import { WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
 import { Jimp, JimpMime } from 'jimp';
@@ -923,6 +929,32 @@ export class ChatwootService {
     return findByName;
   }
 
+  public async getMessageOrigins(instance: InstanceDto, messageIds: string[]) {
+    const origins: MessageOrigin[] = [];
+    for (let offset = 0; offset < messageIds.length; offset += 4000) {
+      origins.push(
+        ...(await this.prismaRepository.messageOrigin.findMany({
+          where: {
+            Instance: { name: instance.instanceName },
+            messageId: { in: messageIds.slice(offset, offset + 4000) },
+          },
+        })),
+      );
+    }
+    return origins;
+  }
+
+  private async externalMessageAttributes(
+    instance: InstanceDto,
+    messageType: string,
+    messageBody?: Pick<WAMessage, 'key'>,
+  ): Promise<ExternalMessageAttributes> {
+    if (messageType !== 'outgoing' || !messageBody?.key?.fromMe || !messageBody.key.id) return {};
+
+    const [origin] = await this.getMessageOrigins(instance, [messageBody.key.id]);
+    return externalOriginAttributes(origin);
+  }
+
   public async createMessage(
     instance: InstanceDto,
     conversationId: number,
@@ -948,6 +980,7 @@ export class ChatwootService {
     const replyToIds = await this.getReplyToIds(messageBody, instance);
 
     const sourceReplyId = quotedMsg?.chatwootMessageId || null;
+    const externalAttributes = await this.externalMessageAttributes(instance, messageType, messageBody);
 
     const create = () =>
       client.messages.create({
@@ -960,6 +993,7 @@ export class ChatwootService {
           private: privateMessage || false,
           source_id: sourceId,
           content_attributes: {
+            ...externalAttributes,
             ...replyToIds,
           },
           source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
@@ -1090,8 +1124,10 @@ export class ChatwootService {
     if (messageBody && instance) {
       const replyToIds = await this.getReplyToIds(messageBody, instance);
 
-      if (replyToIds.in_reply_to || replyToIds.in_reply_to_external_id) {
+      const externalAttributes = await this.externalMessageAttributes(instance, messageType, messageBody);
+      if (replyToIds.in_reply_to || replyToIds.in_reply_to_external_id || externalAttributes.external_source) {
         const content = JSON.stringify({
+          ...externalAttributes,
           ...replyToIds,
         });
         data.append('content_attributes', content);
@@ -1207,7 +1243,14 @@ export class ChatwootService {
     }
   }
 
-  public async sendAttachment(waInstance: any, number: string, media: any, caption?: string, options?: Options) {
+  public async sendAttachment(
+    waInstance: any,
+    number: string,
+    media: any,
+    caption?: string,
+    options?: Options,
+    origin: OutboundOrigin = { kind: 'api' },
+  ) {
     try {
       const parsedMedia = path.parse(decodeURIComponent(media));
       let mimeType = mimeTypes.lookup(parsedMedia?.ext) || '';
@@ -1252,7 +1295,7 @@ export class ChatwootService {
 
         sendTelemetry('/message/sendWhatsAppAudio');
 
-        const messageSent = await waInstance?.audioWhatsapp(data, null, true);
+        const messageSent = await waInstance?.audioWhatsapp(data, null, true, origin);
 
         return messageSent;
       }
@@ -1277,7 +1320,7 @@ export class ChatwootService {
         data.caption = caption;
       }
 
-      const messageSent = await waInstance?.mediaMessage(data, null, true);
+      const messageSent = await waInstance?.mediaMessage(data, null, true, origin);
 
       return messageSent;
     } catch (error) {
@@ -1346,6 +1389,8 @@ export class ChatwootService {
       if (
         !body?.conversation ||
         body.private ||
+        body.content_attributes?.external_echo === true ||
+        body.content_attributes?.external_source === 'evolution_api' ||
         (body.event === 'message_updated' && !body.content_attributes?.deleted)
       ) {
         return { message: 'bot' };
@@ -1469,6 +1514,13 @@ export class ChatwootService {
           return { message: 'bot' };
         }
 
+        const origin: OutboundOrigin = {
+          kind: 'chatwoot',
+          accountId: this.provider.accountId,
+          messageId: body.id,
+          inboxId: body.inbox.id,
+          conversationId: body.conversation.id,
+        };
         let formatText: string;
         if (senderName === null || senderName === undefined) {
           formatText = messageReceived;
@@ -1499,6 +1551,7 @@ export class ChatwootService {
                 attachment.data_url,
                 formatText,
                 options,
+                origin,
               );
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id);
@@ -1529,7 +1582,7 @@ export class ChatwootService {
 
             let messageSent: any;
             try {
-              messageSent = await waInstance?.textMessage(data, true);
+              messageSent = await waInstance?.textMessage(data, true, origin);
               if (!messageSent) {
                 throw new Error('Message not sent');
               }
@@ -2012,6 +2065,19 @@ export class ChatwootService {
       }
 
       if (event === 'messages.upsert' || event === 'send.message') {
+        if (body.key?.fromMe && body.key.id) {
+          const [origin] = await this.getMessageOrigins(instance, [body.key.id]);
+          if (origin?.origin === 'chatwoot') {
+            if (origin.chatwootAccountId !== this.provider.accountId) {
+              throw new Error('Message origin belongs to a different Chatwoot account.');
+            }
+            return {
+              id: origin.chatwootMessageId,
+              inbox_id: origin.chatwootInboxId,
+              conversation_id: origin.chatwootConversationId,
+            };
+          }
+        }
         this.logger.info(`[${event}] New message received - Instance: ${JSON.stringify(body, null, 2)}`);
         if (body.key.remoteJid === 'status@broadcast') {
           return;
@@ -2170,6 +2236,7 @@ export class ChatwootService {
               false,
               [],
               {
+                key: body.key,
                 message: { extendedTextMessage: { contextInfo: { stanzaId: reactionMessage.key.id } } },
               },
               'WAID:' + body.key.id,
@@ -2412,6 +2479,7 @@ export class ChatwootService {
             false,
             [],
             {
+              key,
               message: { extendedTextMessage: { contextInfo: { stanzaId: key.id } } },
             },
             'WAID:' + body.key.id,
