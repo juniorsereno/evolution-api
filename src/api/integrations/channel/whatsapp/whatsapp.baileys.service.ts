@@ -59,6 +59,7 @@ import { PrismaRepository, Query } from '@api/repository/repository.service';
 import { chatbotController, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
+import { OutboundOrigin } from '@api/types/message-origin';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
 import { CacheEngine } from '@cache/cacheengine';
 import {
@@ -104,6 +105,7 @@ import makeWASocket, {
   DisconnectReason,
   downloadContentFromMessage,
   downloadMediaMessage,
+  generateMessageIDV2,
   generateWAMessageFromContent,
   getAggregateVotesInPollMessage,
   GetCatalogOptions,
@@ -2123,6 +2125,7 @@ export class BaileysStartupService extends ChannelStartupService {
     messageId?: string,
     ephemeralExpiration?: number,
     contextInfo?: any,
+    origin: OutboundOrigin = { kind: 'api' },
     // participants?: GroupParticipant[],
   ) {
     sender = sender.toLowerCase();
@@ -2139,8 +2142,23 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (ephemeralExpiration) option.ephemeralExpiration = ephemeralExpiration;
 
-    // NOTE: NÃO DEVEMOS GERAR O messageId AQUI, SOMENTE SE VIER INFORMADO POR PARAMETRO. A GERAÇÃO ANTERIOR IMPEDE O WZAP DE IDENTIFICAR A SOURCE.
-    if (messageId) option.messageId = messageId;
+    messageId ??= generateMessageIDV2(this.client.user?.id);
+    await this.prismaRepository.messageOrigin.create({
+      data: {
+        instanceId: this.instanceId,
+        messageId,
+        origin: origin.kind,
+        ...(origin.kind === 'chatwoot'
+          ? {
+              chatwootAccountId: origin.accountId,
+              chatwootMessageId: origin.messageId,
+              chatwootInboxId: origin.inboxId,
+              chatwootConversationId: origin.conversationId,
+            }
+          : {}),
+      },
+    });
+    option.messageId = messageId;
 
     if (message['viewOnceMessage']) {
       const m = generateWAMessageFromContent(sender, message, {
@@ -2238,6 +2256,7 @@ export class BaileysStartupService extends ChannelStartupService {
             backgroundColor: message['status'].option.backgroundColor,
             font: message['status'].option.font,
             statusJidList: firstBatch,
+            messageId,
           } as unknown as MiscMessageGenerationOptions,
         );
 
@@ -2278,6 +2297,7 @@ export class BaileysStartupService extends ChannelStartupService {
     message: T,
     options?: Options,
     isIntegration = false,
+    origin: OutboundOrigin = { kind: 'api' },
   ) {
     const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
@@ -2379,6 +2399,8 @@ export class BaileysStartupService extends ChannelStartupService {
           quoted,
           null,
           group?.ephemeralDuration,
+          undefined,
+          origin,
           // group?.participants,
         );
       } else {
@@ -2402,6 +2424,7 @@ export class BaileysStartupService extends ChannelStartupService {
           null,
           undefined,
           contextInfo,
+          origin,
         );
       }
 
@@ -2410,6 +2433,11 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       const messageRaw = this.prepareMessage(messageSent);
+      if (origin.kind === 'chatwoot') {
+        messageRaw.chatwootMessageId = origin.messageId;
+        messageRaw.chatwootInboxId = origin.inboxId;
+        messageRaw.chatwootConversationId = origin.conversationId;
+      }
 
       const isMedia =
         messageSent?.message?.imageMessage ||
@@ -2613,7 +2641,7 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   // Send Message Controller
-  public async textMessage(data: SendTextDto, isIntegration = false) {
+  public async textMessage(data: SendTextDto, isIntegration = false, origin: OutboundOrigin = { kind: 'api' }) {
     const text = data.text;
 
     if (!text || text.trim().length === 0) {
@@ -2632,6 +2660,7 @@ export class BaileysStartupService extends ChannelStartupService {
         mentioned: data?.mentioned,
       },
       isIntegration,
+      origin,
     );
   }
 
@@ -2967,7 +2996,12 @@ export class BaileysStartupService extends ChannelStartupService {
     return result;
   }
 
-  public async mediaMessage(data: SendMediaDto, file?: any, isIntegration = false) {
+  public async mediaMessage(
+    data: SendMediaDto,
+    file?: any,
+    isIntegration = false,
+    origin: OutboundOrigin = { kind: 'api' },
+  ) {
     const mediaData: SendMediaDto = { ...data };
 
     if (file) mediaData.media = file.buffer.toString('base64');
@@ -2985,6 +3019,7 @@ export class BaileysStartupService extends ChannelStartupService {
         mentioned: data?.mentioned,
       },
       isIntegration,
+      origin,
     );
 
     return mediaSent;
@@ -3192,7 +3227,12 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
+  public async audioWhatsapp(
+    data: SendAudioDto,
+    file?: any,
+    isIntegration = false,
+    origin: OutboundOrigin = { kind: 'api' },
+  ) {
     const mediaData: SendAudioDto = { ...data };
 
     if (file?.buffer) {
@@ -3215,6 +3255,7 @@ export class BaileysStartupService extends ChannelStartupService {
           { audio: convert, ptt: true, mimetype: 'audio/ogg; codecs=opus' },
           { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
           isIntegration,
+          origin,
         );
 
         return result;
@@ -3232,6 +3273,7 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
       isIntegration,
+      origin,
     );
   }
 

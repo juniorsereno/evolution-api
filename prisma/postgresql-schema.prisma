@@ -79,6 +79,7 @@ model Instance {
   updatedAt               DateTime?                @updatedAt @db.Timestamp
   Chat                    Chat[]
   Contact                 Contact[]
+  MessageOrigin           MessageOrigin[]
   Message                 Message[]
   Webhook                 Webhook?
   Chatwoot                Chatwoot?
@@ -150,6 +151,20 @@ model Contact {
   @@unique([remoteJid, instanceId])
   @@index([remoteJid])
   @@index([instanceId])
+}
+
+model MessageOrigin {
+  instanceId             String
+  messageId              String   @db.VarChar(100)
+  origin                 String   @db.VarChar(20)
+  chatwootAccountId       String?  @db.VarChar(100)
+  chatwootMessageId       Int?     @db.Integer
+  chatwootInboxId         Int?     @db.Integer
+  chatwootConversationId  Int?     @db.Integer
+  createdAt              DateTime @default(now()) @db.Timestamp
+  Instance               Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@id([instanceId, messageId])
 }
 
 model Message {

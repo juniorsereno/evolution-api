@@ -23,7 +23,7 @@ before(async () => {
     INSERT INTO account_users (account_id,user_id,role,created_at,updated_at) VALUES (6,1001,1,NOW(),NOW());
     INSERT INTO contacts (id,name,account_id,created_at,updated_at) VALUES (99999,'Foreign contact',7,NOW(),NOW());`);
   execFileSync('docker', ['exec', '-i', process.env.CHATWOOT_TEST_CONTAINER || 'evolution-import-test',
-    'psql', '-U', 'postgres', '-d', 'evolution_import_test',
+    'psql', '-U', process.env.CHATWOOT_TEST_USER || 'postgres', '-d', 'evolution_import_test',
     '-v', 'import_role=evolution_import_test_role', '-v', 'import_password=synthetic-import-only', '-v', 'account_id=6', '-v', 'api_user_id=1001'], {
     input: readFileSync('deploy/standalone/chatwoot-import-role.sql'), stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -51,6 +51,7 @@ test('imports with account-filtered updatable views and a non-superuser role', a
     message: { conversation: 'Synthetic allowed history' }, messageTimestamp: 1700000000,
   }]);
   assert.equal(await helper.importHistoryMessages(instance, {
+    getMessageOrigins: async () => [],
     getConversationMessage: (message) => message.conversation,
   }, { id: 1001 }, { accountId: '6', token: 'synthetic-history-token', ignoreJids: [] }), 1);
   assert.equal((await restricted.query('SELECT count(*) FROM messages')).rows[0].count, '1');
