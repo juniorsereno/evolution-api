@@ -941,6 +941,11 @@ export class BaileysStartupService extends ChannelStartupService {
       progress?: number;
       syncType?: proto.HistorySync.HistorySyncType;
     }) => {
+      const instance: InstanceDto = { instanceName: this.instance.name };
+      const importHistory =
+        this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+        this.localChatwoot?.enabled &&
+        this.localChatwoot.importMessages;
       try {
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
@@ -948,8 +953,6 @@ export class BaileysStartupService extends ChannelStartupService {
         console.log(
           `recv ${chats.length} chats, ${contacts.length} contacts, ${messages.length} msgs (is latest: ${isLatest}, progress: ${progress}%), type: ${syncType}`,
         );
-
-        const instance: InstanceDto = { instanceName: this.instance.name };
 
         let timestampLimitToImport = null;
 
@@ -1049,17 +1052,23 @@ export class BaileysStartupService extends ChannelStartupService {
           await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
         }
 
+        if (importHistory) {
+          await this.chatwootService.notifyHistoryImport(instance, {
+            stage: 'received',
+            messages: messages.length,
+            chats: chats.length,
+            contacts: contacts.length,
+            progress,
+          });
+        }
+
         await this.contactHandle['contacts.upsert'](
           contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
         );
 
-        if (
-          this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-          this.localChatwoot?.enabled &&
-          this.localChatwoot.importMessages &&
-          messagesRaw.length > 0
-        ) {
+        if (importHistory) {
           const messagesToImport = messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid));
+          let retained = 0;
           if (messagesToImport.length > 0) {
             const historyContacts = contacts.flatMap((contact) =>
               [contact.id, contact.phoneNumber, contact.lid]
@@ -1069,9 +1078,13 @@ export class BaileysStartupService extends ChannelStartupService {
                   pushName: contact.name ?? contact.notify ?? contact.verifiedName ?? null,
                 })),
             );
-            await this.chatwootService.addHistoryMessages(instance, messagesToImport, historyContacts);
-            await this.chatwootService.importHistoryMessages(instance);
+            retained = await this.chatwootService.addHistoryMessages(instance, messagesToImport, historyContacts);
           }
+          const imported = await this.chatwootService.importHistoryMessages(instance, false);
+          await this.chatwootService.notifyHistoryImport(
+            instance,
+            Number.isInteger(imported) ? { stage: 'saved', imported, retained, progress } : { stage: 'failed' },
+          );
         }
 
         contacts = undefined;
@@ -1079,6 +1092,7 @@ export class BaileysStartupService extends ChannelStartupService {
         chats = undefined;
       } catch (error) {
         this.logger.error(error);
+        if (importHistory) await this.chatwootService.notifyHistoryImport(instance, { stage: 'failed' });
       }
     },
 

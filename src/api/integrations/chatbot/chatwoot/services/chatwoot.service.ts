@@ -42,6 +42,11 @@ interface ChatwootMessage {
   isRead?: boolean;
 }
 
+export type HistoryImportStatus =
+  | { stage: 'received'; messages: number; chats: number; contacts: number; progress?: number }
+  | { stage: 'saved'; imported: number; retained: number; progress?: number }
+  | { stage: 'failed' };
+
 export class ChatwootService {
   private readonly logger = new Logger('ChatwootService');
 
@@ -2581,6 +2586,7 @@ export class ChatwootService {
       );
     }
     chatwootImport.addHistoryMessages(instance, prepared);
+    return messagesRaw.length - prepared.length;
   }
 
   public addHistoryContacts(instance: InstanceDto, contactsRaw: ContactModel[]) {
@@ -2591,12 +2597,41 @@ export class ChatwootService {
     return chatwootImport.addHistoryContacts(instance, contactsRaw);
   }
 
-  public async importHistoryMessages(instance: InstanceDto) {
+  public async notifyHistoryImport(instance: InstanceDto, status: HistoryImportStatus) {
+    if (!this.isImportHistoryAvailable()) return;
+
+    let content: string;
+    switch (status.stage) {
+      case 'received':
+        content = i18next.t('cw.import.batchReceived', {
+          ...status,
+          progress: status.progress === undefined ? i18next.t('cw.import.progressUnknown') : `${status.progress}%`,
+        });
+        break;
+      case 'saved':
+        content = i18next.t('cw.import.batchSaved', {
+          ...status,
+          progress: status.progress === undefined ? i18next.t('cw.import.progressUnknown') : `${status.progress}%`,
+        });
+        break;
+      case 'failed':
+        content = i18next.t('cw.import.batchFailed');
+        break;
+    }
+
+    try {
+      await this.createBotMessage(instance, content, 'incoming');
+    } catch {
+      this.logger.warn('Unable to publish history import status to the connection conversation.');
+    }
+  }
+
+  public async importHistoryMessages(instance: InstanceDto, reportStatus = true) {
     if (!this.isImportHistoryAvailable()) {
       return;
     }
 
-    await this.createBotMessage(instance, i18next.t('cw.import.importingMessages'), 'incoming');
+    if (reportStatus) await this.createBotMessage(instance, i18next.t('cw.import.importingMessages'), 'incoming');
 
     const totalMessagesImported = await chatwootImport.importHistoryMessages(
       instance,
@@ -2610,7 +2645,7 @@ export class ChatwootService {
       ? i18next.t('cw.import.messagesImported', { totalMessagesImported })
       : i18next.t('cw.import.messagesException');
 
-    await this.createBotMessage(instance, msg, 'incoming');
+    if (reportStatus) await this.createBotMessage(instance, msg, 'incoming');
 
     return totalMessagesImported;
   }

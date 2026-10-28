@@ -23,5 +23,9 @@
   "cw.contactMessage.number": "Number",
   "cw.message.notsent": "🚨 The message could not be sent. Please check your connection. {{error}}",
   "cw.message.numbernotinwhatsapp": "🚨 The message was not sent as the contact is not a valid Whatsapp number.",
-  "cw.message.edited": "Edited Message"
+  "cw.message.edited": "Edited Message",
+  "cw.import.batchReceived": "History batch received from WhatsApp. Messages: {{messages}}, chats: {{chats}}, contacts: {{contacts}}. Progress reported by WhatsApp: {{progress}}. Processing the data for the connected inbox.",
+  "cw.import.batchSaved": "Batch processed. New messages saved in the inbox: {{imported}}. Messages awaiting phone identification: {{retained}}. Progress reported by WhatsApp: {{progress}}. Existing messages or messages outside the configured period are not imported again.",
+  "cw.import.batchFailed": "This history batch could not be fully processed. Its import into the inbox was not confirmed.",
+  "cw.import.progressUnknown": "not reported"
 }
