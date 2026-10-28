@@ -3199,7 +3199,7 @@ export class BaileysStartupService extends ChannelStartupService {
         const result = this.sendMessageWithTyping<AnyMessageContent>(
           data.number,
           { audio: convert, ptt: true, mimetype: 'audio/ogg; codecs=opus' },
-          { presence: 'recording', delay: data?.delay },
+          { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
           isIntegration,
         );
 
@@ -3216,7 +3216,7 @@ export class BaileysStartupService extends ChannelStartupService {
         ptt: true,
         mimetype: 'audio/ogg; codecs=opus',
       },
-      { presence: 'recording', delay: data?.delay },
+      { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
       isIntegration,
     );
   }
@@ -3664,13 +3664,20 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async getLastMessage(number: string) {
-    const where: any = { key: { remoteJid: number }, instanceId: this.instance.id };
-
-    const messages = await this.prismaRepository.message.findMany({
-      where,
-      orderBy: { messageTimestamp: 'desc' },
-      take: 1,
-    });
+    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
+    const messages =
+      provider === 'mysql'
+        ? await this.prismaRepository.$queryRaw<Message[]>`
+            SELECT * FROM Message
+            WHERE instanceId = ${this.instanceId}
+              AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ${number}
+            ORDER BY messageTimestamp DESC LIMIT 1
+          `
+        : await this.prismaRepository.$queryRaw<Message[]>`
+            SELECT * FROM "Message"
+            WHERE "instanceId" = ${this.instanceId} AND "key"->>'remoteJid' = ${number}
+            ORDER BY "messageTimestamp" DESC LIMIT 1
+          `;
 
     if (messages.length === 0) {
       throw new NotFoundException('Messages not found');
