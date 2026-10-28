@@ -1,0 +1,98 @@
+name: vartana-evolution
+
+services:
+  api:
+    image: ${EVOLUTION_IMAGE:?Set an immutable locally built image}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_OPTIONS: --max-old-space-size=1024
+    extra_hosts:
+      - '${CHATWOOT_HOSTNAME:?Set the local Chatwoot hostname}:host-gateway'
+    ports:
+      - 127.0.0.1:3400:8080
+    volumes:
+      - instances:/evolution/instances
+    networks:
+      default:
+      chatwoot:
+        aliases:
+          - vartana-evolution
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 1536m
+    cpus: 1.5
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/instance/fetchInstances', {headers: {apikey: process.env.AUTHENTICATION_API_KEY}}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+
+  postgres:
+    image: ${POSTGRES_IMAGE:?Set a pinned PostgreSQL image}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a database password}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks:
+      default:
+        aliases:
+          - evolution-postgres
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U evolution -d evolution']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:?Set a pinned Redis image}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set a Redis password}
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD" --maxmemory 192mb --maxmemory-policy noeviction
+    volumes:
+      - redis:/data
+    networks:
+      default:
+        aliases:
+          - evolution-redis
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  instances:
+  postgres:
+  redis:
+
+networks:
+  chatwoot:
+    external: true
+    name: ${CHATWOOT_DOCKER_NETWORK:?Set the existing Chatwoot network}

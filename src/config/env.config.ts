@@ -327,6 +327,7 @@ export type Chatwoot = {
       };
     };
     PLACEHOLDER_MEDIA_MESSAGE: boolean;
+    HISTORICAL_MESSAGES: boolean;
   };
 };
 export type Openai = { ENABLED: boolean; API_KEY_GLOBAL?: string };
@@ -821,6 +822,7 @@ export class ConfigService {
             },
           },
           PLACEHOLDER_MEDIA_MESSAGE: process.env?.CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE === 'true',
+          HISTORICAL_MESSAGES: process.env?.CHATWOOT_IMPORT_HISTORICAL_MESSAGES === 'true',
         },
       },
       OPENAI: {

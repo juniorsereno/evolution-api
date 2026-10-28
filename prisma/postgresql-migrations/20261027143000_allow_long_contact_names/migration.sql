@@ -1,0 +1,6 @@
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE "Chat" ALTER COLUMN "name" TYPE TEXT;
+ALTER TABLE "Contact" ALTER COLUMN "pushName" TYPE TEXT;
+ALTER TABLE "Message" ALTER COLUMN "pushName" TYPE TEXT;
+COMMIT;

@@ -124,7 +124,7 @@ model Session {
 model Chat {
   id             String    @id @default(cuid())
   remoteJid      String    @db.VarChar(100)
-  name           String?   @db.VarChar(100)
+  name           String?   @db.Text
   labels         Json?     @db.Json
   createdAt      DateTime? @default(dbgenerated("CURRENT_TIMESTAMP")) @db.Timestamp
   updatedAt      DateTime? @updatedAt @db.Timestamp
@@ -140,7 +140,7 @@ model Chat {
 model Contact {
   id            String    @id @default(cuid())
   remoteJid     String    @db.VarChar(100)
-  pushName      String?   @db.VarChar(100)
+  pushName      String?   @db.Text
   profilePicUrl String?   @db.VarChar(500)
   createdAt     DateTime? @default(dbgenerated("CURRENT_TIMESTAMP")) @db.Timestamp
   updatedAt     DateTime? @updatedAt @db.Timestamp
@@ -155,7 +155,7 @@ model Contact {
 model Message {
   id                           String          @id @default(cuid())
   key                          Json            @db.Json
-  pushName                     String?         @db.VarChar(100)
+  pushName                     String?         @db.Text
   participant                  String?         @db.VarChar(100)
   messageType                  String          @db.VarChar(100)
   message                      Json            @db.Json
