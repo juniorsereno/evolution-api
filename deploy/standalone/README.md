@@ -89,6 +89,17 @@ its consumers with a MySQL client and a disposable `evolution_mysql_test`
 database. Set `DATABASE_PROVIDER=mysql`; `MYSQL_PRISMA_CLIENT_MODULE` can
 select an isolated generated client when testing alongside PostgreSQL.
 
+History batches publish receipt, saved-message counts, and failures to the
+existing connection conversation used for QR codes. WhatsApp's progress is
+reported separately from database completion: even `100%` does not announce a
+completed inbox import before its transaction commits. Counts apply to each
+processed batch, not a guaranteed complete phone history. Unmapped messages
+remain in Evolution and are reported separately. Notification delivery errors
+are logged without cancelling the import. Empty or repeated batches can retry
+pending imports and report zero new writes without creating duplicates.
+`test/runtime-history-status.test.cjs` exercises the compiled handlers, both
+disposable databases, and the Chatwoot SDK against a local HTTP fixture.
+
 Keep `shouldSyncHistoryMessage` explicit: the pinned Baileys default excludes
 `FULL` payloads. The Windows Desktop profile requires the official
 `WIN_HYBRID` fix. The Baileys dependency is pinned to the controlled fork commit

@@ -69,10 +69,12 @@ test('imports saved initial and FULL history batches after persistence', async (
   let imported = 0;
   let queued = 0;
   subject.chatwootService = {
-    addHistoryMessages: (_instance, messages) => { queued += messages.length; },
+    notifyHistoryImport: async () => {},
+    addHistoryMessages: (_instance, messages) => { queued += messages.length; return 0; },
     importHistoryMessages: async () => {
       assert.equal(await prisma.message.count({ where: { instanceId: instance.id } }), queued);
       imported++;
+      return queued;
     },
   };
   const batch = (id, progress, syncType = 0) => ({
@@ -92,12 +94,14 @@ test('persists recipient names before queueing history for Chatwoot', async () =
   const subject = service(false);
   let queued = false;
   subject.chatwootService = {
+    notifyHistoryImport: async () => {},
     addHistoryMessages: async () => {
       const recipient = await prisma.contact.findFirst({ where: { instanceId: instance.id, remoteJid: '1234567890123456@lid' } });
       assert.equal(recipient.pushName, 'Synthetic recipient');
       queued = true;
+      return 0;
     },
-    importHistoryMessages: async () => {},
+    importHistoryMessages: async () => 0,
   };
   await subject.messageHandle['messaging-history.set']({
     messages: [{ key: { id: 'synthetic-name-order', remoteJid: '1234567890123456@lid', fromMe: true },
