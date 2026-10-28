@@ -75,6 +75,20 @@ columns so one long contact name cannot reject an entire batch. Disabling
 `importContacts` also skips bulk avatar enrichment and Chatwoot contact updates.
 When enabled, that enrichment awaits each request instead of launching the whole
 address book concurrently.
+
+Audio replies forward the quoted message in both the converted and direct
+audio paths, backporting official Evolution PR #2516. The last-message query
+uses a parameterized JSON query for each database provider, adapting PR #2515,
+and stays scoped to the current instance. The existing number lookup already accepts direct LID
+addresses; this fork keeps that behavior without an additional validation
+bypass. `test/runtime-messaging.test.cjs` covers both audio paths, ordinary
+audio, direct LIDs, rejected phone numbers, and the last-message consumers
+against the disposable PostgreSQL database.
+`test/runtime-last-message-mysql.test.cjs` covers the last-message query and
+its consumers with a MySQL client and a disposable `evolution_mysql_test`
+database. Set `DATABASE_PROVIDER=mysql`; `MYSQL_PRISMA_CLIENT_MODULE` can
+select an isolated generated client when testing alongside PostgreSQL.
+
 Keep `shouldSyncHistoryMessage` explicit: the pinned Baileys default excludes
 `FULL` payloads. The Windows Desktop profile requires the official
 `WIN_HYBRID` fix. The Baileys dependency is pinned to the controlled fork commit
