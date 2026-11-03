@@ -1,29 +1,60 @@
 const assert = require('node:assert/strict');
-const { test } = require('node:test');
-const fs = require('node:fs');
-const ts = require('typescript');
-const vm = require('node:vm');
+const { before, after, test, mock } = require('node:test');
+const Module = require('node:module');
+const EventEmitter2 = require('eventemitter2');
+const axios = require('axios');
+let baileys;
+let proto;
 
-// Execute the actual socket hook without opening a WhatsApp connection.
-const source = ts.createSourceFile('service.ts', fs.readFileSync('src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts', 'utf8'), ts.ScriptTarget.Latest, true);
-let hook;
-let normalize;
-function visit(node) {
-  if (ts.isMethodDeclaration(node) && node.name.getText(source) === 'patchMessageBeforeSending') hook = node.getText(source);
-  if (ts.isFunctionDeclaration(node) && node.name?.text === 'normalizeListType') normalize = node.getText(source);
-  ts.forEachChild(node, visit);
-}
-visit(source);
-assert.ok(hook);
+let subject;
+let socketConfig;
+const socket = { ws: new EventEmitter2() };
+
+before(async () => {
+  baileys = await import('baileys');
+  ({ proto } = baileys);
+  const originalLoad = Module._load;
+  const load = mock.method(Module, '_load', function (name, ...args) {
+    if (name === 'baileys') {
+      return { ...baileys, __esModule: true, default: config => {
+        socketConfig = config;
+        return socket;
+      } };
+    }
+    return originalLoad.call(this, name, ...args);
+  });
+  let BaileysStartupService;
+  try {
+    ({ BaileysStartupService } = require('../dist/api/integrations/channel/whatsapp/whatsapp.baileys.service'));
+  } finally {
+    load.mock.restore();
+  }
+  const { configService } = require('../dist/config/env.config');
+  const cache = { get: async () => null, has: async () => false, set: async () => {}, delete: async () => {} };
+  subject = new BaileysStartupService(configService, new EventEmitter2(), {}, cache, cache, cache, null);
+  subject.defineAuthState = async () => ({ state: {
+    creds: baileys.initAuthCreds(), keys: { get: async () => ({}), set: async () => {} },
+  } });
+  subject.eventHandler = () => {};
+  const versionRequest = mock.method(axios, 'get', async url => {
+    assert.equal(url, 'https://web.whatsapp.com/sw.js');
+    return { data: '{"client_revision":123456}' };
+  });
+  try {
+    assert.equal(await subject.reloadConnection(), socket);
+  } finally {
+    versionRequest.mock.restore();
+  }
+  assert.equal(typeof socketConfig?.patchMessageBeforeSending, 'function');
+});
+
+after(() => subject?.messageProcessor.onDestroy());
+
 for (const wrapped of [false, true]) {
-  test(`list normalization preserves protobuf values, wrapped=${wrapped}`, async () => {
-    const { proto } = await import('baileys');
-    const code = ts.transpileModule(`${normalize || ''}; globalThis.hook = ({${hook}}).patchMessageBeforeSending;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    const context = vm.createContext({ proto });
-    vm.runInContext(code, context);
+  test(`configured socket hook preserves protobuf values in lists, wrapped=${wrapped}`, async () => {
     const inner = proto.Message.fromObject({ listMessage: { listType: proto.Message.ListMessage.ListType.PRODUCT_LIST, contextInfo: { ephemeralSettingTimestamp: '1700000000' } } });
     const message = wrapped ? proto.Message.create({ deviceSentMessage: { message: inner } }) : inner;
-    const result = context.hook(message);
+    const result = await socketConfig.patchMessageBeforeSending(message);
     const list = wrapped ? result.deviceSentMessage.message.listMessage : result.listMessage;
     assert.equal(list.listType, proto.Message.ListMessage.ListType.SINGLE_SELECT);
     assert.equal(typeof list.contextInfo.ephemeralSettingTimestamp.isZero, 'function');
