@@ -106,3 +106,15 @@ test('last-message consumers use the latest message of the correct conversation 
     await prisma.instance.delete({ where: { id: foreign.id } });
   }
 });
+
+
+test('chat listing keeps the contact name when the last message was sent by the operator', async () => {
+  const { subject } = service();
+  const jid = '5511900000099@s.whatsapp.net';
+  await prisma.contact.create({ data: { instanceId: instance.id, remoteJid: jid, pushName: 'Customer' } });
+  await prisma.chat.create({ data: { instanceId: instance.id, remoteJid: jid, name: 'Stale chat name' } });
+  await prisma.message.create({ data: { instanceId: instance.id, key: { id: 'name-regression', remoteJid: jid, fromMe: true }, message: { conversation: 'Reply' }, pushName: 'Operator', messageType: 'conversation', source: 'web', messageTimestamp: 1700000000 } });
+  const chats = await subject.fetchChats({ where: { remoteJid: jid } });
+  assert.equal(chats.length, 1);
+  assert.equal(chats[0].pushName, 'Customer');
+});
