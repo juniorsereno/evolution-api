@@ -255,6 +255,10 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly msgRetryCounterCache: CacheStore = new NodeCache();
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
+  private connectionTask?: Promise<WASocket>;
+  private logoutTask?: Promise<void>;
+  private removing = false;
+  private closingConnection = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
 
@@ -271,10 +275,36 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async logoutInstance() {
-    this.messageProcessor.onDestroy();
-    await this.client?.logout('Log out instance: ' + this.instanceName);
+    if (this.logoutTask) return this.logoutTask;
+    this.endSession = true;
+    this.stateConnection = { state: 'close' };
+    this.logoutTask = this.closeSession();
+    try {
+      await this.logoutTask;
+    } finally {
+      this.logoutTask = undefined;
+    }
+  }
 
-    this.client?.ws?.close();
+  public async prepareForRemoval() {
+    this.removing = true;
+    await this.logoutInstance();
+  }
+
+  private async closeSession() {
+    this.messageProcessor.onDestroy();
+    await this.connectionTask?.catch(() => undefined);
+    await this.eventProcessingQueue;
+    try {
+      await this.client?.logout('Log out instance: ' + this.instanceName);
+    } catch {
+      this.logger.warn('Socket logout failed; continuing local session cleanup');
+    }
+    try {
+      this.client?.end(new Error('Session closed'));
+    } catch {
+      this.logger.warn('Socket already closed during session cleanup');
+    }
 
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
@@ -298,10 +328,11 @@ export class BaileysStartupService extends ChannelStartupService {
       await authState.removeCreds();
     }
 
-    const sessionExists = await this.prismaRepository.session.findFirst({ where: { sessionId: this.instanceId } });
-    if (sessionExists) {
-      await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
-    }
+    await this.prismaRepository.session.deleteMany({ where: { sessionId: this.instanceId } });
+    await this.prismaRepository.instance.update({
+      where: { id: this.instanceId },
+      data: { connectionStatus: 'close' },
+    });
   }
 
   public async getProfileName() {
@@ -337,7 +368,9 @@ export class BaileysStartupService extends ChannelStartupService {
     };
   }
 
-  private async connectionUpdate({ qr, connection, lastDisconnect }: Partial<ConnectionState>) {
+  private async connectionUpdate({ qr, connection, lastDisconnect }: Partial<ConnectionState>, client = this.client) {
+    const isCurrent = () => !this.endSession && this.client === client;
+    if (!isCurrent()) return;
     if (qr) {
       if (this.instance.qrcode.count === this.configService.get<QrCode>('QRCODE').LIMIT) {
         this.sendDataWebhook(Events.QRCODE_UPDATED, {
@@ -380,6 +413,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if (this.phoneNumber) {
         await delay(1000);
+        if (!isCurrent()) return;
         this.instance.qrcode.pairingCode = await this.client.requestPairingCode(this.phoneNumber);
       } else {
         this.instance.qrcode.pairingCode = null;
@@ -391,6 +425,7 @@ export class BaileysStartupService extends ChannelStartupService {
           return;
         }
 
+        if (!isCurrent()) return;
         this.instance.qrcode.base64 = base64;
         this.instance.qrcode.code = qr;
 
@@ -422,6 +457,8 @@ export class BaileysStartupService extends ChannelStartupService {
       });
     }
 
+    if (!isCurrent()) return;
+
     if (connection) {
       this.stateConnection = {
         state: connection,
@@ -434,39 +471,44 @@ export class BaileysStartupService extends ChannelStartupService {
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
-        await this.connectToWhatsapp(this.phoneNumber);
+        await this.reloadConnection();
       } else {
-        this.sendDataWebhook(Events.STATUS_INSTANCE, {
-          instance: this.instance.name,
-          status: 'closed',
-          disconnectionAt: new Date(),
-          disconnectionReasonCode: statusCode,
-          disconnectionObject: JSON.stringify(lastDisconnect),
-        });
-
-        await this.prismaRepository.instance.update({
-          where: { id: this.instanceId },
-          data: {
-            connectionStatus: 'close',
+        this.endSession = true;
+        this.closingConnection = true;
+        try {
+          this.sendDataWebhook(Events.STATUS_INSTANCE, {
+            instance: this.instance.name,
+            status: 'closed',
             disconnectionAt: new Date(),
             disconnectionReasonCode: statusCode,
             disconnectionObject: JSON.stringify(lastDisconnect),
-          },
-        });
+          });
 
-        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-          this.chatwootService.eventWhatsapp(
-            Events.STATUS_INSTANCE,
-            { instanceName: this.instance.name, instanceId: this.instanceId },
-            { instance: this.instance.name, status: 'closed' },
-          );
+          await this.prismaRepository.instance.update({
+            where: { id: this.instanceId },
+            data: {
+              connectionStatus: 'close',
+              disconnectionAt: new Date(),
+              disconnectionReasonCode: statusCode,
+              disconnectionObject: JSON.stringify(lastDisconnect),
+            },
+          });
+
+          if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+            this.chatwootService.eventWhatsapp(
+              Events.STATUS_INSTANCE,
+              { instanceName: this.instance.name, instanceId: this.instanceId },
+              { instance: this.instance.name, status: 'closed' },
+            );
+          }
+
+          client.end(new Error('Close connection'));
+          await this.eventEmitter.emitAsync('logout.instance', this.instance.name, 'inner');
+
+          this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
+        } finally {
+          this.closingConnection = false;
         }
-
-        this.eventEmitter.emit('logout.instance', this.instance.name, 'inner');
-        this.client?.ws?.close();
-        this.client.end(new Error('Close connection'));
-
-        this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
       }
     }
 
@@ -478,6 +520,9 @@ export class BaileysStartupService extends ChannelStartupService {
       } catch {
         this.instance.profilePictureUrl = null;
       }
+      if (!isCurrent()) return;
+      const profileName = await this.getProfileName();
+      if (!isCurrent()) return;
       const formattedWuid = this.instance.wuid.split('@')[0].padEnd(30, ' ');
       const formattedName = this.instance.name;
       this.logger.info(
@@ -497,12 +542,13 @@ export class BaileysStartupService extends ChannelStartupService {
         where: { id: this.instanceId },
         data: {
           ownerJid: this.instance.wuid,
-          profileName: (await this.getProfileName()) as string,
+          profileName: profileName as string,
           profilePicUrl: this.instance.profilePictureUrl,
           connectionStatus: 'open',
         },
       });
 
+      if (!isCurrent()) return;
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
         this.chatwootService.eventWhatsapp(
           Events.CONNECTION_UPDATE,
@@ -686,7 +732,7 @@ export class BaileysStartupService extends ChannelStartupService {
       },
     };
 
-    this.endSession = false;
+    if (this.endSession || this.removing) throw new Error('Session closed during connection');
 
     this.client = makeWASocket(socketConfig);
 
@@ -714,31 +760,40 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async connectToWhatsapp(number?: string): Promise<WASocket> {
-    try {
-      this.loadChatwoot();
-      this.loadSettings();
-      this.loadWebhook();
-      this.loadProxy();
+    if (this.removing || this.logoutTask || this.closingConnection) throw new Error('Session is closing');
+    this.endSession = false;
+    return this.startConnection(number, true);
+  }
 
-      // Remontar o messageProcessor para garantir que está funcionando após reconexão
+  private async startConnection(number?: string, loadConfiguration = false): Promise<WASocket> {
+    if (this.connectionTask) return this.connectionTask;
+    const previousClient = this.client;
+    this.client = undefined;
+    this.connectionTask = (async () => {
+      previousClient?.end(new Error('Connection replaced'));
+      if (loadConfiguration) {
+        await Promise.all([this.loadChatwoot(), this.loadSettings(), this.loadWebhook(), this.loadProxy()]);
+      }
+      if (this.endSession || this.removing) throw new Error('Session is closing');
       this.messageProcessor.mount({
         onMessageReceive: this.messageHandle['messages.upsert'].bind(this),
       });
-
-      return await this.createClient(number);
-    } catch (error) {
-      this.logger.error(error);
-      throw new InternalServerErrorException(error?.toString());
+      return this.createClient(number);
+    })();
+    try {
+      return await this.connectionTask;
+    } finally {
+      this.connectionTask = undefined;
     }
   }
 
+  public async restart(): Promise<WASocket> {
+    return this.reloadConnection();
+  }
+
   public async reloadConnection(): Promise<WASocket> {
-    try {
-      return await this.createClient(this.phoneNumber);
-    } catch (error) {
-      this.logger.error(error);
-      throw new InternalServerErrorException(error?.toString());
-    }
+    if (this.endSession || this.removing) throw new Error('Session is closing');
+    return this.startConnection(this.phoneNumber);
   }
 
   private readonly chatHandle = {
@@ -1885,12 +1940,15 @@ export class BaileysStartupService extends ChannelStartupService {
   };
 
   private eventHandler() {
-    this.client.ev.process(async (events) => {
+    const client = this.client;
+    const authState = this.instance.authState;
+    client.ev.process(async (events) => {
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
         try {
-          if (!this.endSession) {
+          if (!this.endSession && this.client === client) {
             const database = this.configService.get<Database>('DATABASE');
             const settings = await this.findSettings();
+            if (this.endSession || this.client !== client) return;
 
             if (events.call) {
               const call = events.call[0];
@@ -1911,13 +1969,17 @@ export class BaileysStartupService extends ChannelStartupService {
               this.sendDataWebhook(Events.CALL, call);
             }
 
-            if (events['connection.update']) {
-              this.connectionUpdate(events['connection.update']);
-            }
+            if (this.endSession || this.client !== client) return;
 
             if (events['creds.update']) {
-              this.instance.authState.saveCreds();
+              await authState.saveCreds();
             }
+
+            if (events['connection.update']) {
+              await this.connectionUpdate(events['connection.update'], client);
+            }
+
+            if (this.endSession || this.client !== client) return;
 
             if (events['messaging-history.set']) {
               const payload = events['messaging-history.set'];
@@ -4031,7 +4093,7 @@ export class BaileysStartupService extends ChannelStartupService {
       await this.client.updateLastSeenPrivacy(settings.last);
       await this.client.updateGroupsAddPrivacy(settings.groupadd);
 
-      this.reloadConnection();
+      await this.reloadConnection();
 
       return {
         update: 'success',
@@ -4120,7 +4182,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       await this.client.updateProfilePicture(this.instance.wuid, pic);
 
-      this.reloadConnection();
+      await this.reloadConnection();
 
       return { update: 'success' };
     } catch (error) {
@@ -4132,7 +4194,7 @@ export class BaileysStartupService extends ChannelStartupService {
     try {
       await this.client.removeProfilePicture(this.instance.wuid);
 
-      this.reloadConnection();
+      await this.reloadConnection();
 
       return { update: 'success' };
     } catch (error) {
