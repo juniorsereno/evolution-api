@@ -103,8 +103,6 @@ import makeWASocket, {
   decryptPollVote,
   delay,
   DisconnectReason,
-  downloadContentFromMessage,
-  downloadMediaMessage,
   generateMessageIDV2,
   generateWAMessageFromContent,
   getAggregateVotesInPollMessage,
@@ -1458,7 +1456,7 @@ export class BaileysStartupService extends ChannelStartupService {
           if (this.localWebhook.enabled) {
             if (isMedia && this.localWebhook.webhookBase64) {
               try {
-                const buffer = await downloadMediaMessage(
+                const buffer = await this.client.downloadMediaMessage(
                   { key: received.key, message: received?.message },
                   'buffer',
                   {},
@@ -1469,7 +1467,7 @@ export class BaileysStartupService extends ChannelStartupService {
                   messageRaw.message.base64 = buffer.toString('base64');
                 } else {
                   // retry to download media
-                  const buffer = await downloadMediaMessage(
+                  const buffer = await this.client.downloadMediaMessage(
                     { key: received.key, message: received?.message },
                     'buffer',
                     {},
@@ -2522,7 +2520,7 @@ export class BaileysStartupService extends ChannelStartupService {
       if (this.localWebhook.enabled) {
         if (isMedia && this.localWebhook.webhookBase64) {
           try {
-            const buffer = await downloadMediaMessage(
+            const buffer = await this.client.downloadMediaMessage(
               { key: messageRaw.key, message: messageRaw?.message },
               'buffer',
               {},
@@ -2533,7 +2531,7 @@ export class BaileysStartupService extends ChannelStartupService {
               messageRaw.message.base64 = buffer.toString('base64');
             } else {
               // retry to download media
-              const buffer = await downloadMediaMessage(
+              const buffer = await this.client.downloadMediaMessage(
                 { key: messageRaw.key, message: messageRaw?.message },
                 'buffer',
                 {},
@@ -3929,7 +3927,7 @@ export class BaileysStartupService extends ChannelStartupService {
       let buffer: Buffer;
 
       try {
-        buffer = await downloadMediaMessage(
+        buffer = await this.client.downloadMediaMessage(
           { key: msg?.key, message: msg?.message },
           'buffer',
           {},
@@ -3942,11 +3940,11 @@ export class BaileysStartupService extends ChannelStartupService {
         if (!mediaType) throw new Error('Could not determine mediaType for fallback');
 
         try {
-          const media = await downloadContentFromMessage(
+          const media = await this.client.downloadContentFromMessage(
             {
               mediaKey: msg.message?.[mediaType]?.mediaKey,
               directPath: msg.message?.[mediaType]?.directPath,
-              url: `https://mmg.whatsapp.net${msg?.message?.[mediaType]?.directPath}`,
+              url: msg.message?.[mediaType]?.url,
             },
             await this.mapMediaType(mediaType),
             {},
