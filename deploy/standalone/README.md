@@ -76,6 +76,13 @@ columns so one long contact name cannot reject an entire batch. Disabling
 When enabled, that enrichment awaits each request instead of launching the whole
 address book concurrently.
 
+Media downloads use the current WhatsApp socket's media host, including
+webhook base64 payloads and the low-level download fallback. The pinned Baileys
+fork fetches media routing on login and shares it with history and app-state
+downloads. Explicit SDK host overrides and standalone download utilities remain
+available. This does not add historical attachment imports to Chatwoot.
+`test/socket-media.test.cjs` covers the compiled API media path and its fallback.
+
 Audio replies forward the quoted message in both the converted and direct
 audio paths, backporting official Evolution PR #2516. The last-message query
 uses a parameterized JSON query for each database provider, adapting PR #2515,
