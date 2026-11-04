@@ -300,7 +300,7 @@ export class InstanceController {
         },
       };
     } catch (error) {
-      this.waMonitor.deleteInstance(instanceData.instanceName);
+      await this.waMonitor.deleteInstance(instanceData.instanceName);
       this.logger.error(isArray(error.message) ? error.message[0] : error.message);
       throw new BadRequestException(isArray(error.message) ? error.message[0] : error.message);
     }
@@ -436,7 +436,10 @@ export class InstanceController {
   public async logout({ instanceName }: InstanceDto) {
     const { instance } = await this.connectionState({ instanceName });
 
-    if (instance.state === 'close') {
+    if (
+      instance.state === 'close' &&
+      (await this.waMonitor.waInstances[instanceName]?.integration) !== Integration.WHATSAPP_BAILEYS
+    ) {
       throw new BadRequestException('The "' + instanceName + '" instance is not connected');
     }
 
@@ -450,17 +453,12 @@ export class InstanceController {
   }
 
   public async deleteInstance({ instanceName }: InstanceDto) {
-    const { instance } = await this.connectionState({ instanceName });
     try {
       const waInstances = this.waMonitor.waInstances[instanceName];
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) waInstances?.clearCacheChatwoot();
 
-      if (instance.state === 'connecting' || instance.state === 'open') {
-        await this.logout({ instanceName });
-      }
-
       try {
-        waInstances?.sendDataWebhook(Events.INSTANCE_DELETE, {
+        await waInstances?.sendDataWebhook(Events.INSTANCE_DELETE, {
           instanceName,
           instanceId: waInstances.instanceId,
         });
@@ -468,7 +466,7 @@ export class InstanceController {
         this.logger.error(error);
       }
 
-      this.eventEmitter.emit('remove.instance', instanceName, 'inner');
+      await this.waMonitor.deleteInstance(instanceName);
       return { status: 'SUCCESS', error: false, response: { message: 'Instance deleted' } };
     } catch (error) {
       throw new BadRequestException(error.toString());

@@ -38,6 +38,7 @@ export class WAMonitoringService {
 
   private readonly logger = new Logger('WAMonitoringService');
   public readonly waInstances: Record<string, any> = {};
+  private readonly removalTasks = new Map<string, Promise<void>>();
   private readonly delInstanceTimeouts: Record<string, NodeJS.Timeout> = {};
 
   private readonly providerSession: ProviderSession;
@@ -55,17 +56,10 @@ export class WAMonitoringService {
         async () => {
           try {
             if (this.waInstances[instance]?.connectionStatus?.state !== 'open') {
-              if (this.waInstances[instance]?.connectionStatus?.state === 'connecting') {
-                if ((await this.waInstances[instance].integration) === Integration.WHATSAPP_BAILEYS) {
-                  await this.waInstances[instance]?.client?.logout('Log out instance: ' + instance);
-                  this.waInstances[instance]?.client?.ws?.close();
-                  this.waInstances[instance]?.client?.end(undefined);
-                }
-                this.eventEmitter.emit('remove.instance', instance, 'inner');
-              } else {
-                this.eventEmitter.emit('remove.instance', instance, 'inner');
-              }
+              await this.deleteInstance(instance);
             }
+          } catch (error) {
+            this.logger.error(error);
           } finally {
             // Clean up timeout reference
             delete this.delInstanceTimeouts[instance];
@@ -262,12 +256,35 @@ export class WAMonitoringService {
     }
   }
 
-  public deleteInstance(instanceName: string) {
+  public async deleteInstance(instanceName: string) {
+    const pending = this.removalTasks.get(instanceName);
+    if (pending) return pending;
+    const removal = this.removeInstanceData(instanceName);
+    this.removalTasks.set(instanceName, removal);
     try {
-      this.eventEmitter.emit('remove.instance', instanceName, 'inner');
+      await removal;
+    } finally {
+      this.removalTasks.delete(instanceName);
+    }
+  }
+
+  private async removeInstanceData(instanceName: string) {
+    const instance = this.waInstances[instanceName];
+    this.clearDelInstanceTime(instanceName);
+    if (instance?.prepareForRemoval) {
+      await instance.prepareForRemoval();
+    } else {
+      await instance?.logoutInstance();
+    }
+    try {
+      await instance?.sendDataWebhook(Events.REMOVE_INSTANCE, null);
     } catch (error) {
       this.logger.error(error);
     }
+    await this.cleaningUp(instanceName);
+    await this.cleaningStoreData(instanceName);
+    delete this.waInstances[instanceName];
+    this.logger.warn(`Instance "${instanceName}" - REMOVED`);
   }
 
   private async setInstance(instanceData: InstanceDto) {
@@ -390,47 +407,28 @@ export class WAMonitoringService {
   }
 
   private removeInstance() {
-    this.eventEmitter.on('remove.instance', async (instanceName: string) => {
+    this.eventEmitter.on('remove.instance', (instanceName: string) => {
+      return this.deleteInstance(instanceName).catch((error) => this.logger.error(error));
+    });
+    this.eventEmitter.on('logout.instance', async (instanceName: string) => {
+      this.clearDelInstanceTime(instanceName);
       try {
-        await this.waInstances[instanceName]?.sendDataWebhook(Events.REMOVE_INSTANCE, null);
-
-        this.clearDelInstanceTime(instanceName);
-
-        this.cleaningUp(instanceName);
-        this.cleaningStoreData(instanceName);
-      } finally {
-        this.logger.warn(`Instance "${instanceName}" - REMOVED`);
-      }
-
-      try {
-        delete this.waInstances[instanceName];
+        await this.waInstances[instanceName]?.sendDataWebhook(Events.LOGOUT_INSTANCE, null);
       } catch (error) {
         this.logger.error(error);
       }
-    });
-    this.eventEmitter.on('logout.instance', async (instanceName: string) => {
-      try {
-        await this.waInstances[instanceName]?.sendDataWebhook(Events.LOGOUT_INSTANCE, null);
-
-        this.clearDelInstanceTime(instanceName);
-
-        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) {
-          this.waInstances[instanceName]?.clearCacheChatwoot();
-        }
-
-        this.cleaningUp(instanceName);
-      } finally {
-        this.logger.warn(`Instance "${instanceName}" - LOGOUT`);
+      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) {
+        await this.waInstances[instanceName]?.clearCacheChatwoot();
       }
+      await this.cleaningUp(instanceName);
+      this.logger.warn(`Instance "${instanceName}" - LOGOUT`);
     });
   }
 
   private noConnection() {
     this.eventEmitter.on('no.connection', async (instanceName) => {
       try {
-        await this.waInstances[instanceName]?.client?.logout('Log out instance: ' + instanceName);
-
-        this.waInstances[instanceName]?.client?.ws?.close();
+        await this.waInstances[instanceName]?.logoutInstance();
 
         this.waInstances[instanceName].instance.qrcode = { count: 0 };
         this.waInstances[instanceName].stateConnection.state = 'close';
