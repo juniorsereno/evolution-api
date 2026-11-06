@@ -2002,7 +2002,15 @@ export class BaileysStartupService extends ChannelStartupService {
             if (this.endSession || this.client !== client) return;
 
             if (events['creds.update']) {
-              await authState.saveCreds();
+              try {
+                await authState.saveCreds();
+              } catch (error) {
+                this.logger.error({
+                  event: 'auth.credentials.persistence.failed',
+                  instanceId: this.instanceId,
+                  cause: error instanceof Error ? error.name : 'Unknown',
+                });
+              }
             }
 
             if (events['connection.update']) {

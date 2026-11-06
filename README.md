@@ -249,3 +249,11 @@ Automatic replay requires the configured Chatwoot import database connection: it
 The additive PostgreSQL/MySQL migration defaults existing records to not pending. It does not replay historical records automatically or recover messages never received/decrypted by Evolution. Rollback can retain the added columns and pending records; the older application will not process this queue. Back up the database before deployment. Merge and deployment are separate operations.
 
 Baileys buffer fix: adapted from WhiskeySockets/Baileys #2577 (41e5b15e46c277f23bbcb012eeb7438cdffc7325); only the reentrant event-buffer change is included, without the Noise/crypto changes from that PR.
+
+### Redis session persistence failures
+
+When both `CACHE_REDIS_ENABLED=true` and `CACHE_REDIS_SAVE_INSTANCES=true`, the instance cache propagates read, write and deletion failures instead of treating them as missing data or completed writes. A missing Redis URI is a configuration error in this mode. Other cache modules retain their best-effort behavior. Redis session keys and the existing double-encoded JSON/Buffer format are unchanged; no data migration or new QR pairing is intended.
+
+Baileys now updates its Signal key cache only after the underlying store confirms the write, retaining the existing mutex. This is the bounded H6 write-order adaptation from WhiskeySockets/Baileys #2574 (`40e7ec7bf0e8f5e815226bcc6d88a0ee8049543a`), without importing LockManager, the transaction rewrite or Signal/Noise changes.
+
+A credentials-save failure from a socket event is explicitly logged as `auth.credentials.persistence.failed` without credential content. Already decrypted messages in the same event continue through the existing delivery path. This does not add a credentials retry scheduler or make multi-key Redis writes atomic; it does not guarantee persistence during an outage. Key-write errors can reach Baileys transaction/retry handling, and failed session removal is reported instead of acknowledged as completed. Back up session storage and retain the prior image before a separately authorized deployment.

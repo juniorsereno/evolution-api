@@ -1,5 +1,5 @@
 import { CacheEngine } from '@cache/cacheengine';
-import { Chatwoot, configService, ProviderSession } from '@config/env.config';
+import { CacheConf, Chatwoot, configService, ProviderSession } from '@config/env.config';
 import { eventEmitter } from '@config/event.config';
 import { Logger } from '@config/logger.config';
 
@@ -52,7 +52,12 @@ if (configService.get<Chatwoot>('CHATWOOT').ENABLED) {
   chatwootCache = new CacheService(new CacheEngine(configService, ChatwootService.name).getEngine());
 }
 
-export const cache = new CacheService(new CacheEngine(configService, 'instance').getEngine());
+const redisConfig = configService.get<CacheConf>('CACHE').REDIS;
+const instanceCacheErrors = redisConfig.ENABLED && redisConfig.SAVE_INSTANCES ? 'throw' : 'ignore';
+export const cache = new CacheService(
+  new CacheEngine(configService, 'instance', instanceCacheErrors).getEngine(),
+  instanceCacheErrors,
+);
 const baileysCache = new CacheService(new CacheEngine(configService, 'baileys').getEngine());
 
 let providerFiles: ProviderFiles = null;

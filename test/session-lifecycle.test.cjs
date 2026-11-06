@@ -188,3 +188,16 @@ test('a failed logout webhook does not prevent local authentication cleanup', as
   m.cleaningUp = async name => { assert.equal(name, 'synthetic'); cleaned = true; };
   await emitter.emitAsync('logout.instance', 'synthetic'); assert.equal(cleaned, true);
 });
+
+test('a reported credentials persistence failure does not discard already decoded messages in the same event', async () => {
+  const { s } = subject();
+  const client = await s.connectToWhatsapp();
+  s.instance.authState.saveCreds = async () => { throw new Error('synthetic storage failure'); };
+  const received = [], errors = [];
+  s.messageHandle['messages.upsert'] = async payload => received.push(...payload.messages);
+  mock.method(s.logger, 'error', error => errors.push(error));
+  const message = { key: { id: 'synthetic-decoded', remoteJid: '123@s.whatsapp.net' }, message: { conversation: 'Synthetic' } };
+  await event(s, client, { 'creds.update': {}, 'messages.upsert': { type: 'notify', messages: [message] } });
+  assert.deepEqual(received, [message]);
+  assert.equal(errors.some(error => error.event === 'auth.credentials.persistence.failed'), true);
+});
