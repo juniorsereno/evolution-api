@@ -3,7 +3,7 @@ import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/d
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
-import { prepareHistoryContacts } from '@api/integrations/chatbot/chatwoot/utils/history-contact';
+import { phoneJid, prepareHistoryContacts } from '@api/integrations/chatbot/chatwoot/utils/history-contact';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -641,11 +641,57 @@ export class ChatwootService {
     return filterPayload;
   }
 
+  private async resolveChatJid(instance: InstanceDto, key: WAMessageKey): Promise<string | null> {
+    const directPhone = phoneJid(key.remoteJid);
+    if (directPhone) return directPhone;
+    const lid = key.remoteJid;
+    if (!lid?.endsWith('@lid')) return lid ?? null;
+    const alternatePhone = phoneJid(key.remoteJidAlt);
+    if (alternatePhone) return alternatePhone;
+
+    const channel = this.waMonitor.waInstances[instance.instanceName];
+    const mappedPhone = phoneJid(await channel.client.signalRepository.lidMapping.getPNForLID(lid));
+    if (mappedPhone) return mappedPhone;
+
+    const knownMessage = await this.prismaRepository.message.findFirst({
+      where: {
+        Instance: { name: instance.instanceName },
+        OR: [
+          {
+            AND: [
+              { key: { path: ['remoteJid'], equals: lid } },
+              { key: { path: ['remoteJidAlt'], string_ends_with: '@s.whatsapp.net' } },
+            ],
+          },
+          {
+            AND: [
+              { key: { path: ['remoteJidAlt'], equals: lid } },
+              { key: { path: ['remoteJid'], string_ends_with: '@s.whatsapp.net' } },
+            ],
+          },
+        ],
+      },
+      select: { key: true },
+      orderBy: { messageTimestamp: 'desc' },
+    });
+    const knownKey = knownMessage?.key;
+    if (!knownKey || typeof knownKey !== 'object' || Array.isArray(knownKey)) return null;
+    return phoneJid(knownKey.remoteJid === lid ? knownKey.remoteJidAlt : knownKey.remoteJid);
+  }
+
   public async createConversation(instance: InstanceDto, body: any) {
     const isLid = body.key.addressingMode === 'lid';
     const isGroup = body.key.remoteJid.endsWith('@g.us');
-    const phoneNumber = isLid && !isGroup ? body.key.remoteJidAlt : body.key.remoteJid;
-    const { remoteJid } = body.key;
+    const phoneNumber = await this.resolveChatJid(instance, body.key);
+    if (!phoneNumber) {
+      this.logger.warn({
+        event: 'chatwoot.identity.pending',
+        instanceName: instance.instanceName,
+        messageId: body.key.id,
+      });
+      return null;
+    }
+    const remoteJid = phoneNumber;
     const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
     const lockKey = `${instance.instanceName}:lock:createConversation-${remoteJid}`;
     const maxWaitTime = 5000; // 5 seconds
@@ -656,7 +702,7 @@ export class ChatwootService {
       // Processa atualização de contatos já criados @lid
       if (phoneNumber && remoteJid && !isGroup) {
         const contact = await this.findContact(instance, phoneNumber.split('@')[0]);
-        if (contact && contact.identifier !== remoteJid) {
+        if (contact && contact.identifier !== phoneNumber) {
           this.logger.verbose(
             `Identifier needs update: (contact.identifier: ${contact.identifier}, phoneNumber: ${phoneNumber}, body.key.remoteJidAlt: ${remoteJid}`,
           );
@@ -2034,6 +2080,33 @@ export class ChatwootService {
         return null;
       }
 
+      const originalRemoteJid = body?.key?.remoteJid;
+      if (event === 'messages.upsert' || event === 'send.message') {
+        if (body.key?.fromMe && body.key.id) {
+          const [origin] = await this.getMessageOrigins(instance, [body.key.id]);
+          if (origin?.origin === 'chatwoot') {
+            if (origin.chatwootAccountId !== this.provider.accountId) {
+              throw new Error('Message origin belongs to a different Chatwoot account.');
+            }
+            return {
+              id: origin.chatwootMessageId,
+              inbox_id: origin.chatwootInboxId,
+              conversation_id: origin.chatwootConversationId,
+            };
+          }
+        }
+        const remoteJid = await this.resolveChatJid(instance, body.key);
+        if (!remoteJid) {
+          this.logger.warn({
+            event: 'chatwoot.identity.pending',
+            instanceName: instance.instanceName,
+            messageId: body.key.id,
+          });
+          return null;
+        }
+        body = { ...body, key: { ...body.key, remoteJid } };
+      }
+
       if (this.provider?.ignoreJids && this.provider?.ignoreJids.length > 0) {
         const ignoreJids: any = this.provider?.ignoreJids;
 
@@ -2058,26 +2131,13 @@ export class ChatwootService {
           return;
         }
 
-        if (ignoreJids.includes(body?.key?.remoteJid)) {
+        if (ignoreJids.includes(body?.key?.remoteJid) || ignoreJids.includes(originalRemoteJid)) {
           this.logger.warn('Ignoring message from jid: ' + body?.key?.remoteJid);
           return;
         }
       }
 
       if (event === 'messages.upsert' || event === 'send.message') {
-        if (body.key?.fromMe && body.key.id) {
-          const [origin] = await this.getMessageOrigins(instance, [body.key.id]);
-          if (origin?.origin === 'chatwoot') {
-            if (origin.chatwootAccountId !== this.provider.accountId) {
-              throw new Error('Message origin belongs to a different Chatwoot account.');
-            }
-            return {
-              id: origin.chatwootMessageId,
-              inbox_id: origin.chatwootInboxId,
-              conversation_id: origin.chatwootConversationId,
-            };
-          }
-        }
         this.logger.info(`[${event}] New message received - Instance: ${JSON.stringify(body, null, 2)}`);
         if (body.key.remoteJid === 'status@broadcast') {
           return;

@@ -222,3 +222,20 @@ Third-party attributions are documented in [NOTICE](./NOTICE).
 <p align="center">
   Made by <a href="https://evolutionfoundation.com.br">Evolution Foundation</a> · © 2026
 </p>
+
+### LID-only messages and contact identity
+
+The Chatwoot integration resolves a direct chat using its phone JID, a valid phone
+alternate supplied by WhatsApp, the connected instance's Baileys LID mapping, or
+a prior message containing the exact LID/phone pair in the same instance. It does
+not derive a phone number from LID digits or borrow another instance's mapping.
+Phone and LID aliases share the canonical phone conversation cache and ignore
+rules; group addressing remains separate. The original persisted message key is
+not rewritten.
+
+When no verified phone is available, the integration records
+`chatwoot.identity.pending` with the instance and message ID and does not create
+an invented contact. With `DATABASE_SAVE_DATA_NEW_MESSAGE=true`, the received
+message remains in Evolution's database. It can be reprocessed once a verified
+mapping is available; this change does not add an automatic replay worker. Missing
+or undecryptable messages that never reached persistence require separate recovery.
