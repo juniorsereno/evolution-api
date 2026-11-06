@@ -192,6 +192,10 @@ model Message {
   sessionId String?
   session   IntegrationSession? @relation(fields: [sessionId], references: [id])
 
+  chatwootDeliveryPending Boolean @default(false)
+  chatwootDeliveryTarget String? @db.VarChar(64)
+
+  @@index([instanceId, chatwootDeliveryPending, id])
   @@index([instanceId])
 }
 

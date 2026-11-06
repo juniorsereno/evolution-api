@@ -31,6 +31,7 @@ import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
+import { createHash } from 'crypto';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
 import { Jimp, JimpMime } from 'jimp';
@@ -2836,6 +2837,84 @@ export class ChatwootService {
     }
   }
 
+  private readonly replayingInstances = new Set<string>();
+
+  public deliveryTarget(provider: Pick<ChatwootDto, 'url' | 'accountId' | 'nameInbox'>): string {
+    return createHash('sha256')
+      .update(JSON.stringify([provider.url, provider.accountId, provider.nameInbox]))
+      .digest('hex');
+  }
+
+  public async replayPendingMessages(instance: InstanceDto): Promise<void> {
+    if (this.replayingInstances.has(instance.instanceName)) return;
+    this.replayingInstances.add(instance.instanceName);
+    try {
+      // The existing import connection provides account/inbox-scoped source-id deduplication.
+      if (!this.isImportHistoryAvailable() || !this.configService.get<Chatwoot>('CHATWOOT').ENABLED) return;
+      const provider = await this.waMonitor.waInstances[instance.instanceName]?.findChatwoot();
+      if (!provider?.enabled) return;
+      // Provider state is mutable on ChatwootService; keep each replay isolated from other instances.
+      const delivery = new ChatwootService(this.waMonitor, this.configService, this.prismaRepository, this.cache);
+      const inbox = await delivery.getInbox(instance);
+      if (!inbox) return;
+      let cursor: string | undefined;
+      for (;;) {
+        const messages = await this.prismaRepository.message.findMany({
+          where: {
+            Instance: { name: instance.instanceName },
+            chatwootDeliveryPending: true,
+            chatwootDeliveryTarget: this.deliveryTarget(provider),
+            ...(cursor ? { id: { gt: cursor } } : {}),
+          },
+          orderBy: { id: 'asc' },
+          take: 100,
+        });
+        if (!messages.length) break;
+        for (const message of messages) {
+          cursor = message.id;
+          try {
+            const key = message.key;
+            if (!key || typeof key !== 'object' || Array.isArray(key) || typeof key.id !== 'string') continue;
+            const existing = await this.pgClient.query(
+              `SELECT m.id, m.inbox_id, c.display_id AS conversation_id FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id AND c.account_id = m.account_id
+               WHERE m.account_id = $1 AND m.inbox_id = $2 AND m.source_id = $3 LIMIT 1`,
+              [provider.accountId, inbox.id, 'WAID:' + key.id],
+            );
+            const delivered =
+              existing.rows[0] || (await delivery.eventWhatsapp(Events.MESSAGES_UPSERT, instance, message));
+            if (delivered?.id) {
+              await this.prismaRepository.message.update({
+                where: { id: message.id },
+                data: {
+                  chatwootDeliveryPending: false,
+                  chatwootMessageId: delivered.id,
+                  chatwootInboxId: delivered.inbox_id,
+                  chatwootConversationId: delivered.conversation_id,
+                },
+              });
+            }
+          } catch {
+            this.logger.error({
+              event: 'chatwoot.delivery.failed',
+              instanceName: instance.instanceName,
+              recordId: message.id,
+            });
+          }
+        }
+      }
+      const pending = await this.prismaRepository.message.count({
+        where: { Instance: { name: instance.instanceName }, chatwootDeliveryPending: true },
+      });
+      if (pending)
+        this.logger.warn({ event: 'chatwoot.delivery.pending', instanceName: instance.instanceName, count: pending });
+    } catch {
+      this.logger.error({ event: 'chatwoot.delivery.replay.failed', instanceName: instance.instanceName });
+    } finally {
+      this.replayingInstances.delete(instance.instanceName);
+    }
+  }
+
   public async syncLostMessages(
     instance: InstanceDto,
     chatwootConfig: ChatwootDto,
@@ -2866,6 +2945,7 @@ export class ChatwootService {
         where: {
           Instance: { name: instance.instanceName },
           messageTimestamp: { gte: Number(dayjs().subtract(6, 'hours').unix()) },
+          chatwootDeliveryPending: false,
           AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
         },
       });
@@ -2895,7 +2975,7 @@ export class ChatwootService {
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
       waInstance.clearCacheChatwoot();
     } catch {
-      return;
+      this.logger.error({ event: 'chatwoot.history.reconciliation.failed', instanceName: instance.instanceName });
     }
   }
 }

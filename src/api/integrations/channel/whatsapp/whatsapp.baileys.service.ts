@@ -1150,8 +1150,8 @@ export class BaileysStartupService extends ChannelStartupService {
       { messages, type, requestId }: { messages: WAMessage[]; type: MessageUpsertType; requestId?: string },
       settings: any,
     ) => {
-      try {
-        for (const received of messages) {
+      for (const received of messages) {
+        try {
           if (
             received?.messageStubParameters?.some?.((param) =>
               [
@@ -1382,6 +1382,25 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const isVideo = received?.message?.videoMessage;
 
+          const deliverToChatwoot =
+            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+            this.localChatwoot?.enabled &&
+            received.key.remoteJid !== 'status@broadcast';
+          // Persist the delivery intent before any external side effect.
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { pollUpdates, ...messageData } = messageRaw;
+          const savedMessage = this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE
+            ? await this.prismaRepository.message.create({
+                data: {
+                  ...messageData,
+                  chatwootDeliveryPending: Boolean(deliverToChatwoot),
+                  chatwootDeliveryTarget: deliverToChatwoot
+                    ? this.chatwootService.deliveryTarget(this.localChatwoot)
+                    : null,
+                },
+              })
+            : null;
+
           if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
             await this.client.readMessages([received.key]);
           }
@@ -1420,9 +1439,16 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { pollUpdates, ...messageData } = messageRaw;
-            const msg = await this.prismaRepository.message.create({ data: messageData });
+            const msg = await this.prismaRepository.message.update({
+              where: { id: savedMessage.id },
+              data: {
+                message: messageRaw.message,
+                chatwootMessageId: messageRaw.chatwootMessageId,
+                chatwootInboxId: messageRaw.chatwootInboxId,
+                chatwootConversationId: messageRaw.chatwootConversationId,
+                chatwootDeliveryPending: Boolean(deliverToChatwoot && !messageRaw.chatwootMessageId),
+              },
+            });
 
             const { remoteJid } = received.key;
             const timestamp = msg.messageTimestamp;
@@ -1456,8 +1482,8 @@ export class BaileysStartupService extends ChannelStartupService {
                 try {
                   if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
                     this.logger.warn('Video upload is disabled. Skipping video upload.');
-                    // Skip video upload by returning early from this block
-                    return;
+                    // Continue with the remaining messages in this batch.
+                    continue;
                   }
 
                   const message: any = received;
@@ -1472,7 +1498,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
                     if (!media) {
                       this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
-                      return;
+                      continue;
                     }
 
                     const { buffer, mediaType, fileName, size } = media;
@@ -1616,9 +1642,13 @@ export class BaileysStartupService extends ChannelStartupService {
               update: contactRaw,
               create: contactRaw,
             });
+        } catch {
+          this.logger.error({
+            event: 'message.processing.failed',
+            instanceId: this.instanceId,
+            messageId: received.key?.id,
+          });
         }
-      } catch (error) {
-        this.logger.error(error);
       }
     },
 
@@ -4800,6 +4830,7 @@ export class BaileysStartupService extends ChannelStartupService {
     if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
       const chatwootConfig = await this.findChatwoot();
       const prepare = (message: any) => this.prepareMessage(message);
+      await this.chatwootService.replayPendingMessages({ instanceName: this.instance.name });
       this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
 
       // Generate ID for this cron task and store in cache
@@ -4807,7 +4838,7 @@ export class BaileysStartupService extends ChannelStartupService {
       const cronKey = `chatwoot:syncLostMessages`;
       await this.chatwootService.getCache()?.hSet(cronKey, this.instance.name, cronId);
 
-      const task = cron.schedule('0,30 * * * *', async () => {
+      const task = cron.schedule('* * * * *', async () => {
         // Check ID before executing (only if cache is available)
         const cache = this.chatwootService.getCache();
         if (cache) {
@@ -4818,7 +4849,10 @@ export class BaileysStartupService extends ChannelStartupService {
             return;
           }
         }
-        this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
+        await this.chatwootService.replayPendingMessages({ instanceName: this.instance.name });
+        if (new Date().getMinutes() % 30 === 0) {
+          this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
+        }
       });
       task.start();
     }

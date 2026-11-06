@@ -239,3 +239,13 @@ an invented contact. With `DATABASE_SAVE_DATA_NEW_MESSAGE=true`, the received
 message remains in Evolution's database. It can be reprocessed once a verified
 mapping is available; this change does not add an automatic replay worker. Missing
 or undecryptable messages that never reached persistence require separate recovery.
+
+### Durable Chatwoot delivery
+
+With `DATABASE_SAVE_DATA_NEW_MESSAGE=true`, incoming `notify`/`append` messages are persisted before Chatwoot delivery, with a durable pending marker. A failed member no longer aborts the remaining messages in the received batch. Pending delivery is retried on connection startup and every minute, without the legacy six-hour history limit. LID-only messages use the current instance mapping on each retry.
+
+Automatic replay requires the configured Chatwoot import database connection: it uses the existing account/inbox-scoped source-ID deduplication, including after an HTTP response is lost. The destination URL, account and inbox name are fingerprinted when queued; changing them leaves the original deliveries pending instead of routing them to a new destination. Current enable/ignore rules still apply. `chatwoot.delivery.pending` reports remaining records and `chatwoot.delivery.replay.failed` reports a failed reconciliation. Unsupported or intentionally ignored messages remain pending; no success is invented.
+
+The additive PostgreSQL/MySQL migration defaults existing records to not pending. It does not replay historical records automatically or recover messages never received/decrypted by Evolution. Rollback can retain the added columns and pending records; the older application will not process this queue. Back up the database before deployment. Merge and deployment are separate operations.
+
+Baileys buffer fix: adapted from WhiskeySockets/Baileys #2577 (41e5b15e46c277f23bbcb012eeb7438cdffc7325); only the reentrant event-buffer change is included, without the Noise/crypto changes from that PR.
