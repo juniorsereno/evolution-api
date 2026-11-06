@@ -12,39 +12,13 @@ export async function useMultiFileAuthStateRedisDb(
 }> {
   const logger = new Logger('useMultiFileAuthStateRedisDb');
 
-  const writeData = async (data: any, key: string): Promise<any> => {
-    try {
-      return await cache.hSet(instanceName, key, data);
-    } catch (error) {
-      return logger.error({ localError: 'writeData', error });
-    }
-  };
+  const writeData = (data: any, key: string) => cache.hSet(instanceName, key, data);
+  const readData = (key: string) => cache.hGet(instanceName, key);
+  const removeData = (key: string) => cache.hDelete(instanceName, key);
 
-  const readData = async (key: string): Promise<any> => {
-    try {
-      return await cache.hGet(instanceName, key);
-    } catch (error) {
-      logger.error({ localError: 'readData', error });
-      return;
-    }
-  };
-
-  const removeData = async (key: string) => {
-    try {
-      return await cache.hDelete(instanceName, key);
-    } catch (error) {
-      logger.error({ readData: 'removeData', error });
-    }
-  };
-
-  async function removeCreds(): Promise<any> {
-    try {
-      logger.warn({ action: 'redis.delete', instanceName });
-
-      return await cache.delete(instanceName);
-    } catch {
-      return;
-    }
+  async function removeCreds(): Promise<void> {
+    logger.warn({ action: 'redis.delete', instanceName });
+    await cache.delete(instanceName);
   }
 
   const creds: AuthenticationCreds = (await readData('creds')) || initAuthCreds();
@@ -71,16 +45,14 @@ export async function useMultiFileAuthStateRedisDb(
           return data;
         },
         set: async (data: any) => {
-          const tasks: Promise<void>[] = [];
           for (const category in data) {
             for (const id in data[category]) {
               const value = data[category][id];
               const key = `${category}-${id}`;
-              tasks.push(value ? await writeData(value, key) : await removeData(key));
+              if (value) await writeData(value, key);
+              else await removeData(key);
             }
           }
-
-          await Promise.all(tasks);
         },
       },
     },

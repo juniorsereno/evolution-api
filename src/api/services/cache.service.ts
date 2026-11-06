@@ -5,7 +5,11 @@ import { BufferJSON } from 'baileys';
 export class CacheService {
   private readonly logger = new Logger('CacheService');
 
-  constructor(private readonly cache: ICache) {
+  constructor(
+    private readonly cache: ICache,
+    private readonly failureMode: 'ignore' | 'throw' = 'ignore',
+  ) {
+    if (!cache && failureMode === 'throw') throw new Error('Persistent cache is not configured');
     if (cache) {
       this.logger.verbose(`cacheservice created using cache engine: ${cache.constructor?.name}`);
     } else {
@@ -33,6 +37,7 @@ export class CacheService {
 
       return null;
     } catch (error) {
+      if (this.failureMode === 'throw') throw error;
       this.logger.error(error);
       return null;
     }
@@ -42,7 +47,7 @@ export class CacheService {
     if (!this.cache) {
       return;
     }
-    this.cache.set(key, value, ttl);
+    await this.cache.set(key, value, ttl);
   }
 
   public async hSet(key: string, field: string, value: any) {
@@ -54,6 +59,7 @@ export class CacheService {
 
       await this.cache.hSet(key, field, json);
     } catch (error) {
+      if (this.failureMode === 'throw') throw error;
       this.logger.error(error);
     }
   }
@@ -80,6 +86,7 @@ export class CacheService {
       await this.cache.hDelete(key, field);
       return true;
     } catch (error) {
+      if (this.failureMode === 'throw') throw error;
       this.logger.error(error);
       return false;
     }

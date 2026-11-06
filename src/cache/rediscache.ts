@@ -14,6 +14,7 @@ export class RedisCache implements ICache {
   constructor(
     private readonly configService: ConfigService,
     private readonly module: string,
+    private readonly failureMode: 'ignore' | 'throw' = 'ignore',
   ) {
     this.conf = this.configService.get<CacheConf>('CACHE')?.REDIS;
     this.client = redisClient.getConnection();
@@ -22,7 +23,7 @@ export class RedisCache implements ICache {
     try {
       return JSON.parse(await this.client.get(this.buildKey(key)));
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -36,7 +37,7 @@ export class RedisCache implements ICache {
 
       return null;
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -44,7 +45,7 @@ export class RedisCache implements ICache {
     try {
       await this.client.setEx(this.buildKey(key), ttl || this.conf?.TTL, JSON.stringify(value));
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -54,7 +55,7 @@ export class RedisCache implements ICache {
 
       await this.client.hSet(this.buildKey(key), field, json);
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -62,7 +63,7 @@ export class RedisCache implements ICache {
     try {
       return (await this.client.exists(this.buildKey(key))) > 0;
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -70,7 +71,7 @@ export class RedisCache implements ICache {
     try {
       return await this.client.del(this.buildKey(key));
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -78,7 +79,7 @@ export class RedisCache implements ICache {
     try {
       return await this.client.hDel(this.buildKey(key), field);
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -91,7 +92,7 @@ export class RedisCache implements ICache {
 
       return await this.client.del(keys);
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
   }
 
@@ -108,8 +109,13 @@ export class RedisCache implements ICache {
 
       return [...new Set(keys)];
     } catch (error) {
-      this.logger.error(error);
+      this.handleError(error);
     }
+  }
+
+  private handleError(error: unknown): void {
+    if (this.failureMode === 'throw') throw error;
+    this.logger.error(error);
   }
 
   buildKey(key: string) {

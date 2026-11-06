@@ -13,12 +13,17 @@ export class CacheEngine {
   constructor(
     private readonly configService: ConfigService,
     module: string,
+    failureMode: 'ignore' | 'throw' = 'ignore',
   ) {
     const cacheConf = configService.get<CacheConf>('CACHE');
 
+    if (failureMode === 'throw' && (!cacheConf?.REDIS?.ENABLED || !cacheConf.REDIS.URI)) {
+      throw new Error('Persistent session storage requires a Redis URI');
+    }
+
     if (cacheConf?.REDIS?.ENABLED && cacheConf?.REDIS?.URI !== '') {
       logger.verbose(`RedisCache initialized for ${module}`);
-      this.engine = new RedisCache(configService, module);
+      this.engine = new RedisCache(configService, module, failureMode);
     } else if (cacheConf?.LOCAL?.ENABLED) {
       logger.verbose(`LocalCache initialized for ${module}`);
       this.engine = new LocalCache(configService, module);
