@@ -170,7 +170,7 @@ export class WAMonitoringService {
       }
     }
 
-    if (this.redis.REDIS.ENABLED && this.redis.REDIS.SAVE_INSTANCES) {
+    if (this.redis.REDIS.ENABLED && (this.redis.REDIS.SAVE_INSTANCES || this.db.SAVE_DATA.INSTANCE)) {
       await this.cache.delete(instanceName);
       if (instanceDbId) {
         await this.cache.delete(instanceDbId);

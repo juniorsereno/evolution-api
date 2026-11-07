@@ -7,6 +7,8 @@ export interface ICache {
 
   hSet(key: string, field: string, value: any): Promise<void>;
 
+  hUpdate(key: string, changes: Record<string, unknown | null>): Promise<void>;
+
   has(key: string): Promise<boolean>;
 
   keys(appendCriteria?: string): Promise<string[]>;

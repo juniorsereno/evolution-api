@@ -27,7 +27,7 @@ before(async () => {
   finally { loader.mock.restore(); }
   ({ configService } = require('../dist/config/env.config'));
 });
-afterEach(() => { for (const s of subjects.splice(0)) s.messageProcessor.onDestroy(); mock.restoreAll(); });
+afterEach(async () => { for (const s of subjects.splice(0)) { s.messageProcessor.onDestroy(); await s.credentialPersistence?.stop(); } mock.restoreAll(); });
 function subject() {
   const writes = [];
   const config = { get(name) {
@@ -147,9 +147,11 @@ test('delete API waits for database cleanup and reports failures instead of succ
 });
 test('pairing credentials in the restart event are persisted before creating the replacement', async () => {
   const { s, writes } = subject(); const old = await s.connectToWhatsapp();
-  const original = s.defineAuthState; s.defineAuthState = async () => { assert.deepEqual(writes.map(w => w[0]), ['creds']); return original(); };
+  s.instance.authState.state.creds.registered = true;
   await event(s, old, { ...close(515), 'creds.update': {} });
   assert.notEqual(s.client, old);
+  assert.deepEqual(writes.map(w => w[0]), ['creds']);
+  assert.equal(s.instance.authState.state.creds.registered, true);
 });
 test('a genuine logout blocks new connections until its cleanup finishes', async () => {
   const { s } = subject(); const client = await s.connectToWhatsapp(); const started = deferred(); const release = deferred();
@@ -200,4 +202,28 @@ test('a reported credentials persistence failure does not discard already decode
   await event(s, client, { 'creds.update': {}, 'messages.upsert': { type: 'notify', messages: [message] } });
   assert.deepEqual(received, [message]);
   assert.equal(errors.some(error => error.event === 'auth.credentials.persistence.failed'), true);
+});
+
+
+test('credentials are retried without a new WhatsApp event and retain the latest state across reconnect', async () => {
+  const { s } = subject();const client=await s.connectToWhatsapp();
+  const state=s.instance.authState;let attempts=0,saved;
+  state.saveCreds=async()=>{if(++attempts===1)throw Error('temporary storage outage');saved=state.state.creds.registered;};
+  await event(s,client,{'creds.update':{}});state.state.creds.registered=true;
+  await s.restart();assert.equal(s.instance.authState.state.creds.registered,true);
+  await new Promise(r=>setTimeout(r,1150));assert.equal(saved,true);assert.equal(attempts,2);
+});
+
+test('logout cancels a scheduled credential retry before deleting authentication', async()=>{
+ const {s}=subject();const client=await s.connectToWhatsapp();let writes=0;
+ s.instance.authState.saveCreds=async()=>{writes++;throw Error('synthetic offline');};
+ await event(s,client,{'creds.update':{}});await s.logoutInstance();await new Promise(r=>setTimeout(r,1150));assert.equal(writes,1);
+});
+test('logout waits for a retry already saving credentials before deleting the session',async()=>{
+ const {s,db}=subject();const client=await s.connectToWhatsapp();const entered=deferred(),release=deferred();let attempts=0,deleted=false;
+ s.instance.authState.saveCreds=async()=>{if(++attempts===1)throw Error('synthetic offline');entered.resolve();await release.promise;};
+ db.session.deleteMany=async()=>{deleted=true;};
+ await event(s,client,{'creds.update':{}});await entered.promise;
+ const closing=s.logoutInstance();await new Promise(r=>setImmediate(r));assert.equal(deleted,false);
+ release.resolve();await closing;assert.equal(deleted,true);assert.equal(attempts,2);
 });

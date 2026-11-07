@@ -1,7 +1,6 @@
 import { prismaRepository } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { CacheConf, configService } from '@config/env.config';
-import { Logger } from '@config/logger.config';
 import { INSTANCE_DIR } from '@config/path.config';
 import { AuthenticationState, BufferJSON, initAuthCreds, WAProto as proto } from 'baileys';
 import fs from 'fs/promises';
@@ -16,65 +15,27 @@ const fixFileName = (file: string): string | undefined => {
   return replacedColon;
 };
 
-export async function keyExists(sessionId: string): Promise<any> {
-  try {
-    const key = await prismaRepository.session.findUnique({ where: { sessionId: sessionId } });
-    return !!key;
-  } catch {
-    return false;
-  }
+export async function saveKey(sessionId: string, keyJson: string): Promise<void> {
+  const creds = JSON.stringify(keyJson);
+  await prismaRepository.session.upsert({
+    where: { sessionId },
+    create: { sessionId, creds },
+    update: { creds },
+  });
 }
 
-export async function saveKey(sessionId: string, keyJson: any): Promise<any> {
-  const exists = await keyExists(sessionId);
-  try {
-    if (!exists)
-      return await prismaRepository.session.create({
-        data: {
-          sessionId: sessionId,
-          creds: JSON.stringify(keyJson),
-        },
-      });
-    await prismaRepository.session.update({
-      where: { sessionId: sessionId },
-      data: { creds: JSON.stringify(keyJson) },
-    });
-  } catch {
-    return null;
-  }
+export async function getAuthKey(sessionId: string): Promise<string | null> {
+  const auth = await prismaRepository.session.findUnique({ where: { sessionId } });
+  if (!auth) return null;
+  const encoded: unknown = JSON.parse(auth.creds);
+  if (typeof encoded !== 'string') throw new Error('Invalid persisted credentials');
+  return encoded;
 }
 
-export async function getAuthKey(sessionId: string): Promise<any> {
-  try {
-    const register = await keyExists(sessionId);
-    if (!register) return null;
-    const auth = await prismaRepository.session.findUnique({ where: { sessionId: sessionId } });
-    return JSON.parse(auth?.creds);
-  } catch {
-    return null;
-  }
+export async function removePrismaAuthState(sessionId: string, cache: CacheService): Promise<void> {
+  if (configService.get<CacheConf>('CACHE').REDIS.ENABLED) await cache.delete(sessionId);
+  await prismaRepository.session.deleteMany({ where: { sessionId } });
 }
-
-async function deleteAuthKey(sessionId: string): Promise<any> {
-  try {
-    const register = await keyExists(sessionId);
-    if (!register) return;
-    await prismaRepository.session.delete({ where: { sessionId: sessionId } });
-  } catch {
-    return;
-  }
-}
-
-async function fileExists(file: string): Promise<any> {
-  try {
-    const stat = await fs.stat(file);
-    if (stat.isFile()) return true;
-  } catch {
-    return;
-  }
-}
-
-const logger = new Logger('useMultiFileAuthStatePrisma');
 
 export default async function useMultiFileAuthStatePrisma(
   sessionId: string,
@@ -86,90 +47,30 @@ export default async function useMultiFileAuthStatePrisma(
 }> {
   const localFolder = path.join(INSTANCE_DIR, sessionId);
   const localFile = (key: string) => path.join(localFolder, fixFileName(key) + '.json');
-  await fs.mkdir(localFolder, { recursive: true });
-
-  async function writeData(data: any, key: string): Promise<any> {
-    const dataString = JSON.stringify(data, BufferJSON.replacer);
-    const cacheConfig = configService.get<CacheConf>('CACHE');
-
-    if (key != 'creds') {
-      if (cacheConfig.REDIS.ENABLED) {
-        return await cache.hSet(sessionId, key, data);
-      } else {
-        await fs.writeFile(localFile(key), dataString);
-        return;
-      }
-    }
-    await saveKey(sessionId, dataString);
-    return;
-  }
+  const redisEnabled = configService.get<CacheConf>('CACHE').REDIS.ENABLED;
+  if (!redisEnabled) await fs.mkdir(localFolder, { recursive: true });
 
   async function readData(key: string): Promise<any> {
-    try {
-      let rawData;
-      const cacheConfig = configService.get<CacheConf>('CACHE');
-
-      if (key != 'creds') {
-        if (cacheConfig.REDIS.ENABLED) {
-          return await cache.hGet(sessionId, key);
-        } else {
-          if (!(await fileExists(localFile(key)))) return null;
-          rawData = await fs.readFile(localFile(key), { encoding: 'utf-8' });
-          return JSON.parse(rawData, BufferJSON.reviver);
-        }
-      } else {
-        rawData = await getAuthKey(sessionId);
-      }
-
-      const parsedData = JSON.parse(rawData, BufferJSON.reviver);
-      return parsedData;
-    } catch {
-      return null;
+    if (key === 'creds') {
+      const raw = await getAuthKey(sessionId);
+      if (raw === null) return null;
+      const value = JSON.parse(raw, BufferJSON.reviver);
+      if (!value || typeof value !== 'object') throw new Error('Invalid persisted credentials');
+      return value;
     }
-  }
-
-  async function removeData(key: string): Promise<any> {
+    if (redisEnabled) return cache.hGet(sessionId, key);
     try {
-      const cacheConfig = configService.get<CacheConf>('CACHE');
-
-      if (key != 'creds') {
-        if (cacheConfig.REDIS.ENABLED) {
-          return await cache.hDelete(sessionId, key);
-        } else {
-          await fs.unlink(localFile(key));
-        }
-      } else {
-        await deleteAuthKey(sessionId);
-      }
-    } catch {
-      return;
+      return JSON.parse(await fs.readFile(localFile(key), 'utf8'), BufferJSON.reviver);
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+      throw error;
     }
-  }
-
-  async function removeCreds(): Promise<any> {
-    const cacheConfig = configService.get<CacheConf>('CACHE');
-
-    // Redis
-    try {
-      if (cacheConfig.REDIS.ENABLED) {
-        await cache.delete(sessionId);
-        logger.info({ action: 'redis.delete', sessionId });
-
-        return;
-      }
-    } catch (err) {
-      logger.warn({ action: 'redis.delete', sessionId, err });
-    }
-
-    logger.info({ action: 'auth.key.delete', sessionId });
-
-    await deleteAuthKey(sessionId);
   }
 
   let creds = await readData('creds');
   if (!creds) {
     creds = initAuthCreds();
-    await writeData(creds, 'creds');
+    await saveKey(sessionId, JSON.stringify(creds, BufferJSON.replacer));
   }
 
   return {
@@ -191,23 +92,26 @@ export default async function useMultiFileAuthStatePrisma(
           return data;
         },
         set: async (data) => {
-          const tasks = [];
-          for (const category in data) {
-            for (const id in data[category]) {
-              const value = data[category][id];
-              const key = `${category}-${id}`;
-
-              tasks.push(value ? writeData(value, key) : removeData(key));
-            }
+          const changes: Record<string, unknown | null> = {};
+          for (const [category, values] of Object.entries(data)) {
+            for (const [id, value] of Object.entries(values)) changes[`${category}-${id}`] = value ?? null;
           }
-          await Promise.all(tasks);
+          if (redisEnabled) return cache.hUpdate(sessionId, changes);
+          const serialized = Object.entries(changes).map(([key, value]) => [
+            key,
+            value === null ? null : JSON.stringify(value, BufferJSON.replacer),
+          ]);
+          for (const [key, value] of serialized) {
+            if (value === null) await fs.rm(localFile(key), { force: true });
+            else await fs.writeFile(localFile(key), value);
+          }
         },
       },
     },
     saveCreds: () => {
-      return writeData(creds, 'creds');
+      return saveKey(sessionId, JSON.stringify(creds, BufferJSON.replacer));
     },
 
-    removeCreds,
+    removeCreds: () => removePrismaAuthState(sessionId, cache),
   };
 }
