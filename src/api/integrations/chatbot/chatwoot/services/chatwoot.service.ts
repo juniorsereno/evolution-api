@@ -41,6 +41,8 @@ import mimeTypes from 'mime-types';
 import path from 'path';
 import { Readable } from 'stream';
 
+import { isReactionRemoval } from '../utils/reaction-removal';
+
 interface ChatwootMessage {
   messageId?: number;
   inboxId?: number;
@@ -2066,6 +2068,9 @@ export class ChatwootService {
   }
 
   public async eventWhatsapp(event: string, instance: InstanceDto, body: any) {
+    if ((event === Events.MESSAGES_UPSERT || event === Events.SEND_MESSAGE) && isReactionRemoval(body?.message)) {
+      return null;
+    }
     try {
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
 
@@ -2307,6 +2312,7 @@ export class ChatwootService {
               this.logger.warn('message not sent');
               return;
             }
+            return send;
           }
 
           return;
@@ -2875,6 +2881,19 @@ export class ChatwootService {
           try {
             const key = message.key;
             if (!key || typeof key !== 'object' || Array.isArray(key) || typeof key.id !== 'string') continue;
+            if (isReactionRemoval(message.message)) {
+              await this.prismaRepository.message.update({
+                where: { id: message.id },
+                data: { chatwootDeliveryPending: false },
+              });
+              this.logger.info({
+                event: 'chatwoot.delivery.ignored',
+                reason: 'reaction_removal',
+                instanceName: instance.instanceName,
+                recordId: message.id,
+              });
+              continue;
+            }
             const existing = await this.pgClient.query(
               `SELECT m.id, m.inbox_id, c.display_id AS conversation_id FROM messages m
                JOIN conversations c ON c.id = m.conversation_id AND c.account_id = m.account_id

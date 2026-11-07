@@ -53,6 +53,7 @@ import {
   TypeButton,
 } from '@api/dto/sendMessage.dto';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
+import { isReactionRemoval } from '@api/integrations/chatbot/chatwoot/utils/reaction-removal';
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository, Query } from '@api/repository/repository.service';
@@ -1391,7 +1392,8 @@ export class BaileysStartupService extends ChannelStartupService {
           const deliverToChatwoot =
             this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
             this.localChatwoot?.enabled &&
-            received.key.remoteJid !== 'status@broadcast';
+            received.key.remoteJid !== 'status@broadcast' &&
+            !isReactionRemoval(messageRaw.message);
           // Persist the delivery intent before any external side effect.
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const { pollUpdates, ...messageData } = messageRaw;
@@ -1415,11 +1417,7 @@ export class BaileysStartupService extends ChannelStartupService {
             await this.client.readMessages([received.key]);
           }
 
-          if (
-            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-            this.localChatwoot?.enabled &&
-            !received.key.id.includes('@broadcast')
-          ) {
+          if (deliverToChatwoot) {
             const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
               Events.MESSAGES_UPSERT,
               { instanceName: this.instance.name, instanceId: this.instanceId },

@@ -284,6 +284,7 @@ class ChatwootImport {
         }),
       );
       const originsById = new Map(origins.map((origin) => [origin.messageId, origin]));
+      let missingOriginals = 0;
       for (const origin of origins.filter((value) => value.origin === 'chatwoot')) {
         if (origin.chatwootAccountId !== provider.accountId || origin.chatwootInboxId !== inbox.id) {
           throw new Error('Message origin does not belong to the configured account and inbox.');
@@ -300,7 +301,21 @@ class ChatwootImport {
             origin.chatwootConversationId,
           ],
         );
-        if (linked.rowCount !== 1) throw new Error('Original Chatwoot message was not found in the configured inbox.');
+        if (linked.rowCount !== 1) {
+          const original = await pgClient.query(
+            'SELECT id FROM messages WHERE id = $1 AND account_id = $2 AND inbox_id = $3',
+            [origin.chatwootMessageId, provider.accountId, inbox.id],
+          );
+          if (original.rowCount) throw new Error('Original Chatwoot message belongs to a different conversation.');
+          missingOriginals++;
+        }
+      }
+      if (missingOriginals) {
+        this.logger.warn({
+          event: 'chatwoot.history.originals_missing',
+          instanceName: instance.instanceName,
+          count: missingOriginals,
+        });
       }
       let totalMessagesImported = 0;
 

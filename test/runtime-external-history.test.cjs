@@ -85,3 +85,41 @@ test('keeps origin lookup scoped to the current instance even when another insta
   const row = (await app.query('SELECT content_attributes FROM messages')).rows[0];
   assert.equal(JSON.parse(row.content_attributes).external_source, 'whatsapp');
 });
+
+test('missing originals do not block valid history and are never recreated', async () => {
+  const { instance, subject, dto } = await service();
+  const conversation = await original(subject, dto);
+  await prisma.messageOrigin.create({ data: {
+    instanceId: instance.id, messageId: 'synthetic-missing-original', origin: 'chatwoot',
+    chatwootAccountId: '6', chatwootMessageId: 9001, chatwootInboxId: 1001,
+    chatwootConversationId: conversation.display_id,
+  } });
+  await app.query('DELETE FROM messages WHERE id=9001');
+  const batch = [message('synthetic-missing-original'), message('synthetic-valid-neighbor', false)];
+  assert.equal(await importBatch(subject, dto, batch), 1);
+  assert.equal(await importBatch(subject, dto, batch), 0);
+  assert.equal((await app.query("SELECT count(*) FROM messages WHERE id=9001 OR source_id='WAID:synthetic-missing-original'")).rows[0].count, '0');
+  assert.equal((await app.query("SELECT count(*) FROM messages WHERE source_id='WAID:synthetic-valid-neighbor'")).rows[0].count, '1');
+  assert.equal(await prisma.messageOrigin.count({ where: { instanceId: instance.id, messageId: 'synthetic-missing-original' } }), 1);
+});
+
+for (const mismatch of ['account', 'inbox', 'conversation']) {
+  test('an invalid origin still blocks the batch without changing another message: ' + mismatch, async () => {
+    const { instance, subject, dto } = await service();
+    const conversation = await original(subject, dto);
+    const origin = await prisma.messageOrigin.create({ data: {
+      instanceId: instance.id, messageId: 'synthetic-invalid-origin', origin: 'chatwoot',
+      chatwootAccountId: mismatch === 'account' ? '7' : '6',
+      chatwootMessageId: 9001,
+      chatwootInboxId: mismatch === 'inbox' ? 1003 : 1001,
+      chatwootConversationId: conversation.display_id + (mismatch === 'conversation' ? 9999 : 0),
+    } });
+    assert.equal(await importBatch(subject, dto, [message(origin.messageId), message('synthetic-after-invalid', false)]), undefined);
+    assert.equal((await app.query("SELECT count(*) FROM messages WHERE source_id='WAID:synthetic-after-invalid'")).rows[0].count, '0');
+    assert.equal((await app.query('SELECT source_id FROM messages WHERE id=9001')).rows[0].source_id, null);
+    await prisma.messageOrigin.update({ where: { instanceId_messageId: { instanceId: instance.id, messageId: origin.messageId } },
+      data: { chatwootAccountId: '6', chatwootInboxId: 1001, chatwootConversationId: conversation.display_id, chatwootMessageId: 9001 } });
+    assert.equal(await subject.importHistoryMessages(dto, false), 1);
+    assert.equal((await app.query('SELECT source_id FROM messages WHERE id=9001')).rows[0].source_id, 'WAID:synthetic-invalid-origin');
+  });
+}
