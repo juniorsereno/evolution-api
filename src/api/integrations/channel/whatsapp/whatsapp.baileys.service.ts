@@ -82,12 +82,13 @@ import { Boom } from '@hapi/boom';
 import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance, Message } from '@prisma/client';
 import { createJid } from '@utils/createJid';
+import { CredentialPersistence } from '@utils/credential-persistence';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
-import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
+import useMultiFileAuthStatePrisma, { removePrismaAuthState } from '@utils/use-multi-file-auth-state-prisma';
 import { AuthStateProvider } from '@utils/use-multi-file-auth-state-provider-files';
 import { useMultiFileAuthStateRedisDb } from '@utils/use-multi-file-auth-state-redis-db';
 import axios from 'axios';
@@ -255,6 +256,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly msgRetryCounterCache: CacheStore = new NodeCache();
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
+  private credentialPersistence?: CredentialPersistence;
   private connectionTask?: Promise<WASocket>;
   private logoutTask?: Promise<void>;
   private removing = false;
@@ -295,6 +297,7 @@ export class BaileysStartupService extends ChannelStartupService {
     this.messageProcessor.onDestroy();
     await this.connectionTask?.catch(() => undefined);
     await this.eventProcessingQueue;
+    await this.stopCredentialPersistence();
     try {
       await this.client?.logout('Log out instance: ' + this.instanceName);
     } catch {
@@ -317,15 +320,11 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (cache?.REDIS.ENABLED && cache?.REDIS.SAVE_INSTANCES) {
-      const authState = await useMultiFileAuthStateRedisDb(this.instance.id, this.cache);
-
-      await authState.removeCreds();
+      await this.cache.delete(this.instance.id);
     }
 
     if (db.SAVE_DATA.INSTANCE) {
-      const authState = await useMultiFileAuthStatePrisma(this.instance.id, this.cache);
-
-      await authState.removeCreds();
+      await removePrismaAuthState(this.instance.id, this.cache);
     }
 
     await this.prismaRepository.session.deleteMany({ where: { sessionId: this.instanceId } });
@@ -333,6 +332,12 @@ export class BaileysStartupService extends ChannelStartupService {
       where: { id: this.instanceId },
       data: { connectionStatus: 'close' },
     });
+  }
+
+  private async stopCredentialPersistence(): Promise<void> {
+    await this.credentialPersistence?.stop();
+    this.credentialPersistence = undefined;
+    this.instance.authState = undefined;
   }
 
   public async getProfileName() {
@@ -476,6 +481,7 @@ export class BaileysStartupService extends ChannelStartupService {
         this.endSession = true;
         this.closingConnection = true;
         try {
+          await this.stopCredentialPersistence();
           this.sendDataWebhook(Events.STATUS_INSTANCE, {
             instance: this.instance.name,
             status: 'closed',
@@ -626,7 +632,7 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async createClient(number?: string): Promise<WASocket> {
-    this.instance.authState = await this.defineAuthState();
+    this.instance.authState ??= await this.defineAuthState();
 
     const session = this.configService.get<ConfigSessionPhone>('CONFIG_SESSION_PHONE');
 
@@ -1972,6 +1978,18 @@ export class BaileysStartupService extends ChannelStartupService {
   private eventHandler() {
     const client = this.client;
     const authState = this.instance.authState;
+    this.credentialPersistence ??= new CredentialPersistence(
+      async () => {
+        await authState.saveCreds();
+      },
+      (error) =>
+        this.logger.error({
+          event: 'auth.credentials.persistence.failed',
+          instanceId: this.instanceId,
+          cause: error instanceof Error ? error.name : 'Unknown',
+        }),
+    );
+    const credentialPersistence = this.credentialPersistence;
     client.ev.process(async (events) => {
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
         try {
@@ -2001,17 +2019,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
             if (this.endSession || this.client !== client) return;
 
-            if (events['creds.update']) {
-              try {
-                await authState.saveCreds();
-              } catch (error) {
-                this.logger.error({
-                  event: 'auth.credentials.persistence.failed',
-                  instanceId: this.instanceId,
-                  cause: error instanceof Error ? error.name : 'Unknown',
-                });
-              }
-            }
+            if (events['creds.update']) await credentialPersistence.request();
 
             if (events['connection.update']) {
               await this.connectionUpdate(events['connection.update'], client);

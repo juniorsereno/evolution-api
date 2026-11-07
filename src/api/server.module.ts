@@ -1,5 +1,5 @@
 import { CacheEngine } from '@cache/cacheengine';
-import { CacheConf, Chatwoot, configService, ProviderSession } from '@config/env.config';
+import { CacheConf, Chatwoot, configService, Database, ProviderSession } from '@config/env.config';
 import { eventEmitter } from '@config/event.config';
 import { Logger } from '@config/logger.config';
 
@@ -53,7 +53,10 @@ if (configService.get<Chatwoot>('CHATWOOT').ENABLED) {
 }
 
 const redisConfig = configService.get<CacheConf>('CACHE').REDIS;
-const instanceCacheErrors = redisConfig.ENABLED && redisConfig.SAVE_INSTANCES ? 'throw' : 'ignore';
+const instanceCacheErrors =
+  redisConfig.ENABLED && (redisConfig.SAVE_INSTANCES || configService.get<Database>('DATABASE').SAVE_DATA.INSTANCE)
+    ? 'throw'
+    : 'ignore';
 export const cache = new CacheService(
   new CacheEngine(configService, 'instance', instanceCacheErrors).getEngine(),
   instanceCacheErrors,

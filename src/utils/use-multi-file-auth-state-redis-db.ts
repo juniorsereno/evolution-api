@@ -14,7 +14,6 @@ export async function useMultiFileAuthStateRedisDb(
 
   const writeData = (data: any, key: string) => cache.hSet(instanceName, key, data);
   const readData = (key: string) => cache.hGet(instanceName, key);
-  const removeData = (key: string) => cache.hDelete(instanceName, key);
 
   async function removeCreds(): Promise<void> {
     logger.warn({ action: 'redis.delete', instanceName });
@@ -45,14 +44,11 @@ export async function useMultiFileAuthStateRedisDb(
           return data;
         },
         set: async (data: any) => {
+          const changes: Record<string, unknown | null> = {};
           for (const category in data) {
-            for (const id in data[category]) {
-              const value = data[category][id];
-              const key = `${category}-${id}`;
-              if (value) await writeData(value, key);
-              else await removeData(key);
-            }
+            for (const id in data[category]) changes[`${category}-${id}`] = data[category][id] ?? null;
           }
+          await cache.hUpdate(instanceName, changes);
         },
       },
     },
