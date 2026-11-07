@@ -82,6 +82,19 @@ export class LocalCache implements ICache {
     }
   }
 
+  async hUpdate(key: string, changes: Record<string, unknown | null>): Promise<void> {
+    const updates = Object.entries(changes).map(([field, value]) => [
+      field,
+      value === null ? null : JSON.stringify(value, BufferJSON.replacer),
+    ]);
+    const hash = { ...LocalCache.localCache.get<Record<string, string>>(this.buildKey(key)) };
+    for (const [field, value] of updates) {
+      if (value === null) delete hash[field];
+      else hash[field] = value;
+    }
+    LocalCache.localCache.set(this.buildKey(key), hash);
+  }
+
   async hDelete(key: string, field: string) {
     try {
       const data = LocalCache.localCache.get(this.buildKey(key)) as object;

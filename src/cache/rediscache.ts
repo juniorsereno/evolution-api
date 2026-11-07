@@ -59,6 +59,30 @@ export class RedisCache implements ICache {
     }
   }
 
+  async hUpdate(key: string, changes: Record<string, unknown | null>): Promise<void> {
+    const updates = Object.entries(changes).map(([field, value]) => [
+      field,
+      value === null ? null : JSON.stringify(value, BufferJSON.replacer),
+    ]);
+    if (!updates.length) return;
+    await this.client.eval(
+      `local kind = redis.call('TYPE', KEYS[1]).ok
+       if kind ~= 'none' and kind ~= 'hash' then
+         return redis.error_reply('WRONGTYPE session keys must be a hash')
+       end
+       local updates = cjson.decode(ARGV[1])
+       for _, update in ipairs(updates) do
+         if update[2] == cjson.null then
+           redis.call('HDEL', KEYS[1], update[1])
+         else
+           redis.call('HSET', KEYS[1], update[1], update[2])
+         end
+       end
+       return 1`,
+      { keys: [this.buildKey(key)], arguments: [JSON.stringify(updates)] },
+    );
+  }
+
   async has(key: string) {
     try {
       return (await this.client.exists(this.buildKey(key))) > 0;

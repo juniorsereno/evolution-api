@@ -64,6 +64,17 @@ export class CacheService {
     }
   }
 
+  async hUpdate(key: string, changes: Record<string, unknown | null>): Promise<void> {
+    if (!this.cache) throw new Error('Persistent cache is not configured');
+    const serialized = Object.fromEntries(
+      Object.entries(changes).map(([field, value]) => [
+        field,
+        value === null ? null : JSON.stringify(value, BufferJSON.replacer),
+      ]),
+    );
+    await this.cache.hUpdate(key, serialized);
+  }
+
   async has(key: string) {
     if (!this.cache) {
       return;
