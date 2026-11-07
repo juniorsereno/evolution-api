@@ -128,3 +128,77 @@ test('skipping disabled video storage does not discard the next received message
  assert.deepEqual(seen,['video-skip','after-video']);
  assert.equal(await prisma.message.count({where:{instanceId:instance.id}}),2);
 });
+
+for (const text of [undefined, '']) {
+  test('reaction removal completes without creating a message, text=' + String(text), async () => {
+    const s = subject();
+    mapped = null;
+    const m = await pending(s, 'removed-reaction');
+    const reaction = { key: { id: 'original-message', remoteJid: lid, fromMe: false } };
+    if (text !== undefined) reaction.text = text;
+    await prisma.message.update({ where: { id: m.id }, data: { messageType: 'reactionMessage', message: { reactionMessage: reaction } } });
+    await s.replayPendingMessages(scope());
+    await subject().replayPendingMessages(scope());
+    const saved = await prisma.message.findUnique({ where: { id: m.id } });
+    assert.equal(saved.chatwootDeliveryPending, false);
+    assert.equal(saved.chatwootMessageId, null);
+    assert.deepEqual(saved.message, { reactionMessage: reaction });
+    assert.equal(posts, 0);
+    assert.equal((await app.query('SELECT count(*) FROM messages')).rows[0].count, '0');
+  });
+}
+
+test('a non-empty reaction is delivered and acknowledged once', async () => {
+  const s = subject(), m = await pending(s, 'added-reaction', phone);
+  await prisma.message.update({ where: { id: m.id }, data: { messageType: 'reactionMessage',
+    message: { reactionMessage: { key: { id: 'original-message', fromMe: true, remoteJid: phone }, text: '👍' } } } });
+  await s.replayPendingMessages(scope());
+  const saved = await prisma.message.findUnique({ where: { id: m.id } });
+  assert.equal(saved.chatwootDeliveryPending, false);
+  assert.ok(saved.chatwootMessageId);
+  await s.replayPendingMessages(scope());
+  assert.equal(posts, 1);
+  assert.equal((await app.query('SELECT content FROM messages')).rows[0].content, '👍');
+});
+test('malformed reaction removal remains pending', async () => {
+  const s = subject(), m = await pending(s, 'malformed-removal');
+  mapped = null;
+  await prisma.message.update({ where: { id: m.id }, data: { messageType: 'reactionMessage', message: { reactionMessage: { text: '' } } } });
+  await s.replayPendingMessages(scope());
+  assert.equal((await prisma.message.findUnique({ where: { id: m.id } })).chatwootDeliveryPending, true);
+  assert.equal(posts, 0);
+});
+test('a live removal is preserved locally without enqueueing or sending it, and the next message proceeds', async () => {
+  const c = cache();
+  const r = new BaileysStartupService(configService, new EventEmitter2(), prisma, c, c, c, null);
+  receivers.push(r);
+  Object.assign(r.instance, { id: instance.id, name: instance.name });
+  Object.assign(r.localChatwoot, provider);
+  r.sendDataWebhook = async () => {};
+  r.chatwootService = subject();
+  const seen = [];
+  r.chatwootService.eventWhatsapp = async (event, scope, body) => {
+    if (event !== 'messages.upsert') return;
+    seen.push(body.key.id);
+    throw Error('Synthetic following-message failure');
+  };
+  const removal = { ...data('live-removal', phone), message: { reactionMessage: { key: { id: 'original-message' } } } };
+  await r.messageHandle['messages.upsert']({ type: 'notify', messages: [removal, data('after-removal', phone)] }, {});
+  const saved = await prisma.message.findFirst({ where: { instanceId: instance.id, key: { path: ['id'], equals: 'live-removal' } } });
+  assert.equal(saved.chatwootDeliveryPending, false);
+  assert.equal(saved.chatwootMessageId, null);
+  assert.deepEqual(seen, ['after-removal']);
+  assert.equal(await prisma.message.count({ where: { instanceId: instance.id, chatwootDeliveryPending: true } }), 1);
+});
+
+test('reaction removal cannot clear a delivery belonging to a different configured destination', async () => {
+  const s = subject(), m = await pending(s, 'removal-other-target');
+  await prisma.message.update({ where: { id: m.id }, data: { message: { reactionMessage: { key: { id: 'original-message' } } } } });
+  const original = provider;
+  provider = { ...provider, accountId: '7' };
+  try {
+    await s.replayPendingMessages(scope());
+    assert.equal((await prisma.message.findUnique({ where: { id: m.id } })).chatwootDeliveryPending, true);
+    assert.equal(posts, 0);
+  } finally { provider = original; }
+});
