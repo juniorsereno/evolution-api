@@ -101,3 +101,35 @@ test('terminal logout cleanup removes hybrid Redis keys as well as PostgreSQL cr
  await monitor.cleaningUp(instance.name);
  assert.equal(await prisma.session.count({where:{sessionId:instance.id}}),0);assert.equal(await admin.exists('synthetic-hybrid:instance:'+instance.id),0);
 });
+
+test('SDK record transactions preserve session ordering through the hybrid Redis adapter',async()=>{
+ const sdk=await import('baileys'),logger=require('pino')({level:'silent'});
+ const a=await authAdapter(instance.id,cache);
+ const keys=sdk.addTransactionCapability(sdk.makeCacheableSignalKeyStore(a.state.keys,logger),logger,{maxCommitRetries:1,delayBetweenTriesMs:0});
+ let signal,release;const ready=new Promise(r=>{signal=r}),finish=new Promise(r=>{release=r});
+ const first=keys.transaction(async()=>{
+  await keys.transactWith({records:[{type:'session',id:'peer'}]},async()=>keys.set({session:{peer:Buffer.from('first')}}));
+  signal();await finish;
+ },'outbound');
+ await ready;
+ const second=keys.transactWith({records:[{type:'session',id:'peer'}]},async()=>keys.set({session:{peer:Buffer.from('second')}}));
+ await new Promise(r=>setImmediate(r));
+ const before=(await a.state.keys.get('session',['peer'])).peer;
+ release();await Promise.all([first,second]);assert.equal(before,null);
+ const reload=await authAdapter(instance.id,cache);assert.deepEqual((await reload.state.keys.get('session',['peer'])).peer,Buffer.from('second'));
+});
+test('SDK failed identity/session commits leave both persisted values intact and release their locks',async()=>{
+ const sdk=await import('baileys'),logger=require('pino')({level:'silent'});
+ const a=await authAdapter(instance.id,cache);
+ const keys=sdk.addTransactionCapability(sdk.makeCacheableSignalKeyStore(a.state.keys,logger),logger,{maxCommitRetries:1,delayBetweenTriesMs:0});
+ await keys.set({session:{peer:Buffer.from('old')},'identity-key':{peer:Buffer.from('old-identity')}});
+ const scope={records:[{type:'session',id:'peer'},{type:'identity-key',id:'peer'}]};
+ const replace=()=>keys.transactWith(scope,async()=>keys.set({session:{peer:null},'identity-key':{peer:Buffer.from('new-identity')}}));
+ await admin.configSet('min-replicas-to-write','1');
+ try{await assert.rejects(replace(),/NOREPLICAS/);}finally{await admin.configSet('min-replicas-to-write','0');}
+ const reload=await authAdapter(instance.id,cache);
+ assert.deepEqual((await reload.state.keys.get('session',['peer'])).peer,Buffer.from('old'));
+ assert.deepEqual((await reload.state.keys.get('identity-key',['peer'])).peer,Buffer.from('old-identity'));
+ await replace();assert.equal((await reload.state.keys.get('session',['peer'])).peer,null);
+ assert.deepEqual((await reload.state.keys.get('identity-key',['peer'])).peer,Buffer.from('new-identity'));
+});
