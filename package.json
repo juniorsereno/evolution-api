@@ -77,7 +77,7 @@
     "amqplib": "^0.10.5",
     "audio-decode": "^2.2.3",
     "axios": "^1.7.9",
-    "baileys": "git+https://github.com/juniorsereno/Baileys.git#0713b1352fba5105652a06eb2932a4228d7df84e",
+    "baileys": "git+https://github.com/juniorsereno/Baileys.git#69f61ac91accd1a8404799251c047d969893a597",
     "class-validator": "^0.14.1",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
