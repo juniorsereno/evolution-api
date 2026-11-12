@@ -119,7 +119,6 @@ import makeWASocket, {
   jidNormalizedUser,
   makeCacheableSignalKeyStore,
   MessageUpsertType,
-  MessageUserReceiptUpdate,
   MiscMessageGenerationOptions,
   ParticipantAction,
   prepareWAMessageMedia,
@@ -155,6 +154,13 @@ import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
+import {
+  captureGroupReceiptRecipients,
+  MessageReceiptService,
+  participantReceiptStatus,
+  ReceiptStatus,
+  receiptStatus,
+} from './message-receipt.service';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -264,6 +270,10 @@ export class BaileysStartupService extends ChannelStartupService {
   private closingConnection = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
+  private readonly receiptService = new MessageReceiptService(
+    this.prismaRepository,
+    this.configService.get<Database>('DATABASE').PROVIDER === 'mysql',
+  );
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
@@ -1666,6 +1676,12 @@ export class BaileysStartupService extends ChannelStartupService {
           continue;
         }
 
+        const confirmedStatus = receiptStatus(update.status);
+        if (confirmedStatus) {
+          await this.recordMessageReceipt(key, confirmedStatus);
+          if (!update.pollUpdates && !update.message) continue;
+        }
+
         const updateKey = `${this.instance.id}_${key.id}_${update.status}`;
 
         const cached = await this.baileysCache.get(updateKey);
@@ -1685,16 +1701,6 @@ export class BaileysStartupService extends ChannelStartupService {
           await this.baileysCache.set(updateKey, update.messageTimestamp, 30 * 60);
         } else {
           await this.baileysCache.set(updateKey, secondsSinceEpoch, 30 * 60);
-        }
-
-        if (status[update.status] === 'READ' && key.fromMe) {
-          if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-            this.chatwootService.eventWhatsapp(
-              'messages.read',
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              { key: key },
-            );
-          }
         }
 
         if (key.remoteJid !== 'status@broadcast' && key.id !== undefined) {
@@ -1770,7 +1776,12 @@ export class BaileysStartupService extends ChannelStartupService {
             continue;
           }
 
-          if (findMessage && update.status !== undefined && status[update.status] !== findMessage.status) {
+          if (
+            !confirmedStatus &&
+            findMessage &&
+            update.status !== undefined &&
+            status[update.status] !== findMessage.status
+          ) {
             if (!key.fromMe && key.remoteJid) {
               readChatToUpdate[key.remoteJid] = true;
 
@@ -1973,6 +1984,50 @@ export class BaileysStartupService extends ChannelStartupService {
     },
   };
 
+  private async recordMessageReceipt(key: WAMessageKey, confirmedStatus: ReceiptStatus, participant?: string) {
+    try {
+      const database = this.configService.get<Database>('DATABASE').SAVE_DATA;
+      if (!database.HISTORIC && !database.NEW_MESSAGE) return;
+      const result = await this.receiptService.record(
+        this.instanceId,
+        key,
+        confirmedStatus,
+        database.MESSAGE_UPDATE,
+        participant,
+      );
+      if (!result) return;
+      if (result.recorded || result.changed || !database.MESSAGE_UPDATE) {
+        this.sendDataWebhook(Events.MESSAGES_UPDATE, result.data);
+      }
+      if (!result.key.fromMe && confirmedStatus === 'READ') {
+        await this.updateMessagesReadedByTimestamp(result.key.remoteJid, result.messageTimestamp);
+        await this.updateChatUnreadMessages(result.key.remoteJid);
+      }
+      if (result.key.fromMe && this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot.enabled) {
+        void this.chatwootService
+          .syncMessageReceiptStatus(
+            { instanceName: this.instance.name, instanceId: this.instanceId },
+            result.data.messageId,
+          )
+          .catch((error: unknown) => {
+            this.logger.error({
+              event: 'message.receipt.chatwoot.failed',
+              instanceId: this.instanceId,
+              messageId: key.id,
+              cause: error instanceof Error ? error.name : 'Unknown',
+            });
+          });
+      }
+    } catch (error) {
+      this.logger.error({
+        event: 'message.receipt.processing.failed',
+        instanceId: this.instanceId,
+        messageId: key.id,
+        cause: error instanceof Error ? error.name : 'Unknown',
+      });
+    }
+  }
+
   private eventHandler() {
     const client = this.client;
     const authState = this.instance.authState;
@@ -2043,20 +2098,12 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             if (events['message-receipt.update']) {
-              const payload = events['message-receipt.update'] as MessageUserReceiptUpdate[];
-              const remotesJidMap: Record<string, number> = {};
-
-              for (const event of payload) {
-                if (typeof event.key.remoteJid === 'string' && typeof event.receipt.readTimestamp === 'number') {
-                  remotesJidMap[event.key.remoteJid] = event.receipt.readTimestamp;
-                }
+              for (const { key, receipt } of events['message-receipt.update']) {
+                const participant = receipt.userJid;
+                if (!participant) continue;
+                const confirmedStatus = participantReceiptStatus(receipt);
+                if (confirmedStatus) await this.recordMessageReceipt(key, confirmedStatus, participant);
               }
-
-              await Promise.all(
-                Object.keys(remotesJidMap).map(async (remoteJid) =>
-                  this.updateMessagesReadedByTimestamp(remoteJid, remotesJidMap[remoteJid]),
-                ),
-              );
             }
 
             if (events['presence.update']) {
@@ -2462,6 +2509,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       let mentions: string[];
       let contextInfo: any;
+      let groupReceiptRecipients: string[][];
 
       if (isJidGroup(sender)) {
         let group;
@@ -2477,6 +2525,8 @@ export class BaileysStartupService extends ChannelStartupService {
         if (!group) {
           throw new NotFoundException('Group not found');
         }
+
+        groupReceiptRecipients = captureGroupReceiptRecipients(group.participants, this.client.user);
 
         if (options?.mentionsEveryOne === true) {
           mentions = group.participants.map((participant) => participant.id);
@@ -2570,7 +2620,15 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-        const msg = await this.prismaRepository.message.create({ data: messageRaw });
+        const msg = await this.prismaRepository.message.create({
+          data: {
+            ...messageRaw,
+            ...(groupReceiptRecipients ? { groupReceiptRecipients } : {}),
+            ...(origin.kind === 'chatwoot' && origin.expectedParts
+              ? { chatwootMessageParts: origin.expectedParts }
+              : {}),
+          },
+        });
 
         if (isMedia && this.configService.get<S3>('S3').ENABLE) {
           try {

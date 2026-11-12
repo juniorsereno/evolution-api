@@ -2,7 +2,14 @@ import type { MessageOrigin } from '@prisma/client';
 
 export type OutboundOrigin =
   | { kind: 'api' }
-  | { kind: 'chatwoot'; accountId: string; messageId: number; inboxId: number; conversationId: number };
+  | {
+      kind: 'chatwoot';
+      accountId: string;
+      messageId: number;
+      inboxId: number;
+      conversationId: number;
+      expectedParts?: number;
+    };
 
 export type ExternalMessageAttributes =
   | { external_source: 'whatsapp'; external_echo: true }

@@ -11,15 +11,7 @@ import { ExternalMessageAttributes, externalOriginAttributes, OutboundOrigin } f
 import { Events } from '@api/types/wa.types';
 import { Chatwoot, ConfigService, Database, HttpServer } from '@config/env.config';
 import { Logger } from '@config/logger.config';
-import ChatwootClient, {
-  ChatwootAPIConfig,
-  contact,
-  contact_inboxes,
-  conversation,
-  conversation_show,
-  generic_id,
-  inbox,
-} from '@figuro/chatwoot-sdk';
+import ChatwootClient, { ChatwootAPIConfig, contact, conversation, generic_id, inbox } from '@figuro/chatwoot-sdk';
 import { request as chatwootRequest } from '@figuro/chatwoot-sdk/dist/core/request';
 import {
   Chatwoot as ChatwootModel,
@@ -1569,6 +1561,10 @@ export class ChatwootService {
           messageId: body.id,
           inboxId: body.inbox.id,
           conversationId: body.conversation.id,
+          expectedParts: body.conversation.messages.reduce(
+            (count, message) => count + Math.max(message.attachments?.length || 0, 1),
+            0,
+          ),
         };
         let formatText: string;
         if (senderName === null || senderName === undefined) {
@@ -1759,6 +1755,57 @@ export class ChatwootService {
         this.logger.error(`Error updating Chatwoot message source ID: ${error}`);
       }
     }
+  }
+
+  public async syncMessageReceiptStatus(instance: InstanceDto, messageId: string) {
+    const provider = await this.getProvider(instance);
+    if (!provider?.enabled) return null;
+    if (!provider.accountId || !provider.url || !provider.token)
+      throw new Error('Incomplete Chatwoot receipt configuration');
+    const message = await this.prismaRepository.message.findFirst({
+      where: { id: messageId, instanceId: instance.instanceId },
+    });
+    if (!message?.chatwootMessageId || !message.chatwootConversationId) return null;
+    const key = message.key;
+    if (!key || typeof key !== 'object' || Array.isArray(key) || key.fromMe !== true || typeof key.id !== 'string')
+      return null;
+    const origin = await this.prismaRepository.messageOrigin.findUnique({
+      where: { instanceId_messageId: { instanceId: instance.instanceId, messageId: key.id } },
+    });
+    if (
+      origin?.origin === 'chatwoot' &&
+      (origin.chatwootAccountId !== provider.accountId ||
+        origin.chatwootMessageId !== message.chatwootMessageId ||
+        origin.chatwootInboxId !== message.chatwootInboxId ||
+        origin.chatwootConversationId !== message.chatwootConversationId)
+    ) {
+      throw new Error('Receipt mapping does not belong to the configured Chatwoot destination');
+    }
+    const related = await this.prismaRepository.message.findMany({
+      where: { instanceId: instance.instanceId, chatwootMessageId: message.chatwootMessageId },
+      select: { status: true, chatwootConversationId: true, chatwootInboxId: true, chatwootMessageParts: true },
+    });
+    if (
+      related.some(
+        (row) =>
+          row.chatwootConversationId !== message.chatwootConversationId ||
+          row.chatwootInboxId !== message.chatwootInboxId,
+      )
+    ) {
+      throw new Error('Conflicting receipt mappings for one Chatwoot message');
+    }
+    if (related.some((row) => row.chatwootMessageParts && related.length < row.chatwootMessageParts)) return null;
+    const status = related.every((row) => row.status === 'READ' || row.status === 'PLAYED')
+      ? 'read'
+      : related.every((row) => ['DELIVERY_ACK', 'READ', 'PLAYED'].includes(row.status))
+        ? 'delivered'
+        : null;
+    if (!status) return null;
+    return axios.patch(
+      `${provider.url.replace(/\/$/, '')}/api/v1/accounts/${encodeURIComponent(provider.accountId)}/conversations/${message.chatwootConversationId}/messages/${message.chatwootMessageId}`,
+      { status },
+      { headers: { api_access_token: provider.token }, timeout: 15000 },
+    );
   }
 
   private async getMessageByKeyId(instance: InstanceDto, keyId: string): Promise<MessageModel> {
@@ -2555,45 +2602,6 @@ export class ChatwootService {
           if (!send) {
             this.logger.warn('edited message not sent');
             return;
-          }
-        }
-        return;
-      }
-
-      if (event === 'messages.read') {
-        if (!body?.key?.id || !body?.key?.remoteJid) {
-          this.logger.warn('message id not found');
-          return;
-        }
-
-        const message = await this.getMessageByKeyId(instance, body.key.id);
-        const conversationId = message?.chatwootConversationId;
-        const contactInboxSourceId = message?.chatwootContactInboxSourceId;
-
-        if (conversationId) {
-          let sourceId = contactInboxSourceId;
-          const inbox = (await this.getInbox(instance)) as inbox & {
-            inbox_identifier?: string;
-          };
-
-          if (!sourceId && inbox) {
-            const conversation = (await client.conversations.get({
-              accountId: this.provider.accountId,
-              conversationId: conversationId,
-            })) as conversation_show & {
-              last_non_activity_message: { conversation: { contact_inbox: contact_inboxes } };
-            };
-            sourceId = conversation.last_non_activity_message?.conversation?.contact_inbox?.source_id;
-          }
-
-          if (sourceId && inbox?.inbox_identifier) {
-            const url =
-              `/public/api/v1/inboxes/${inbox.inbox_identifier}/contacts/${sourceId}` +
-              `/conversations/${conversationId}/update_last_seen`;
-            await chatwootRequest(this.getClientCwConfig(), {
-              method: 'POST',
-              url: url,
-            });
           }
         }
         return;
