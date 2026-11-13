@@ -202,3 +202,33 @@ test('reaction removal cannot clear a delivery belonging to a different configur
     assert.equal(posts, 0);
   } finally { provider = original; }
 });
+
+test('a pending associated-child text reaches Vartana without losing its original envelope',async()=>{
+ const s=subject(),m=await pending(s,'associated-text',phone);
+ const envelope={associatedChildMessage:{message:{conversation:'Synthetic associated message'}}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'associatedChildMessage',message:envelope}});
+ await s.replayPendingMessages(scope());
+ assert.equal(posts,1);
+ const saved=await prisma.message.findUnique({where:{id:m.id}});
+ assert.equal(saved.chatwootDeliveryPending,false);
+ assert.deepEqual(saved.message,envelope);
+ assert.equal((await app.query('SELECT content FROM messages')).rows[0].content,'Synthetic associated message');
+});
+
+test('associated-child media uses the attachment upload and source-id deduplication',async()=>{
+ const s=subject(),m=await pending(s,'associated-media',phone);
+ const envelope={associatedChildMessage:{message:{documentMessage:{fileName:'synthetic.txt',mimetype:'text/plain'}}}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'associatedChildMessage',message:envelope}});
+ await s.replayPendingMessages(scope());await s.replayPendingMessages(scope());
+ assert.equal(posts,1);assert.equal(attachmentSeen,true);
+ const saved=await prisma.message.findUnique({where:{id:m.id}});assert.equal(saved.chatwootDeliveryPending,false);assert.deepEqual(saved.message,envelope);
+ assert.equal((await app.query('SELECT source_id FROM messages')).rows[0].source_id,'WAID:associated-media');
+});
+
+test('an associated child with no decoded message remains stored and pending',async()=>{
+ const s=subject(),m=await pending(s,'associated-empty',phone);
+ const envelope={associatedChildMessage:{}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'associatedChildMessage',message:envelope}});
+ await s.replayPendingMessages(scope());
+ assert.equal(posts,0);const saved=await prisma.message.findUnique({where:{id:m.id}});assert.equal(saved.chatwootDeliveryPending,true);assert.deepEqual(saved.message,envelope);
+});

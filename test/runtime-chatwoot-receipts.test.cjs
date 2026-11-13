@@ -16,7 +16,7 @@ const { BaileysStartupService } = require('../dist/api/integrations/channel/what
 const { MessageReceiptService } = require('../dist/api/integrations/channel/whatsapp/message-receipt.service');
 const { configService } = require('../dist/config/env.config');
 const prisma = new PrismaClient();
-const receipts = new MessageReceiptService(prisma, false);
+const receipts = new MessageReceiptService(prisma, false, async () => null);
 const group = '120363000000011@g.us', phone = '12025550102@s.whatsapp.net';
 let first, second, service, server, providers, requests, failHttp, holdHttp, heldResponses;
 const receivers = [];
@@ -170,4 +170,22 @@ test('the Vartana webhook passes the complete attachment count to every WhatsApp
   assert.equal(origins.length, 2);
   assert.deepEqual(origins.map(origin => origin.expectedParts), [2, 2]);
   assert.notEqual(result, null);
+});
+
+test('verified PN/LID receipts update the mapped Vartana message without resending WhatsApp content', async () => {
+  const saved = await message('direct-lid-http');
+  const subject = new BaileysStartupService(configService, new EventEmitter2(), prisma, {}, {}, {}, null);
+  Object.assign(subject.instance, { id: first.id, name: first.name, authState: { saveCreds: async () => {} } });
+  subject.findSettings = async () => ({ groupsIgnore: false }); subject.sendDataWebhook = async () => {};
+  subject.localChatwoot.enabled = true; subject.chatwootService = service;
+  let dispatch;
+  subject.client = { user: { id: '12025550101@s.whatsapp.net' }, signalRepository: { lidMapping: { getPNForLID: async lid => lid === '100000000002@lid' ? phone : null } }, ev: { process: callback => { dispatch = callback; } } };
+  subject.eventHandler(); receivers.push(subject);
+  await dispatch({ 'messages.update': [{ key: { id: saved.key.id, remoteJid: '100000000002@lid' }, update: { status: 3 } }] }); await subject.eventProcessingQueue; await waitForRequests(1);
+  await dispatch({ 'messages.update': [{ key: { id: saved.key.id, remoteJid: '100000000002:5@hosted.lid' }, update: { status: 4 } }] }); await subject.eventProcessingQueue; await waitForRequests(2);
+  assert.deepEqual(requests.map(r => [r.method, r.url, r.body.status]), [
+    ['PATCH', '/api/v1/accounts/6/conversations/42/messages/9001', 'delivered'],
+    ['PATCH', '/api/v1/accounts/6/conversations/42/messages/9001', 'read'],
+  ]);
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'READ');
 });

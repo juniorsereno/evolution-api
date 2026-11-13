@@ -273,6 +273,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly receiptService = new MessageReceiptService(
     this.prismaRepository,
     this.configService.get<Database>('DATABASE').PROVIDER === 'mysql',
+    (lid) => this.client.signalRepository.lidMapping.getPNForLID(lid),
   );
 
   // Cache TTL constants (in seconds)
