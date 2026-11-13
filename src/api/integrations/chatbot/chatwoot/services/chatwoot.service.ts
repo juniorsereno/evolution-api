@@ -22,7 +22,7 @@ import {
 import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
-import { WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
+import { normalizeMessageContent, WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
 import { createHash } from 'crypto';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
@@ -2196,11 +2196,7 @@ export class ChatwootService {
           return;
         }
 
-        if (body.message?.ephemeralMessage?.message) {
-          body.message = {
-            ...body.message?.ephemeralMessage?.message,
-          };
-        }
+        body = { ...body, message: normalizeMessageContent(body.message) ?? body.message };
 
         const originalMessage = await this.getConversationMessage(body.message);
         const bodyMessage = originalMessage

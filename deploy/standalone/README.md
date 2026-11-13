@@ -141,3 +141,26 @@ with that database URI and `DATABASE_SAVE_DATA_CONTACTS=true`,
 The restricted-role test uses a disposable Docker container named
 `evolution-import-test`, or `CHATWOOT_TEST_CONTAINER`. Run the two files in the
 listed order, not concurrently, because they share the disposable database.
+
+## Live attachment uploads to Vartana
+
+The Vartana ingress and attachment validation must both allow the intended file
+size. For a 100 MiB attachment limit, set Vartana's `MAXIMUM_FILE_UPLOAD_SIZE` to
+`100` through `InstallationConfig` (which clears the shared configuration cache),
+and set `client_max_body_size 110m;` in the Vartana HTTPS server to accommodate
+multipart overhead. Validate the complete candidate with `nginx -t` before a
+graceful reload. Keep backups of the prior setting and ingress configuration.
+The separate Evolution ingress limit does not control Evolution-to-Vartana uploads.
+
+A `413` response leaves live attachments in Evolution's pending-delivery ledger.
+After correcting the receiving limit, use the existing pending-delivery replay:
+it retains the original `WAID:` source ID and account/inbox deduplication. Do not
+resend the message through WhatsApp or create another Vartana message manually.
+
+Individual delivery/read receipts accept PN, LID, hosted and device-qualified
+aliases only when the message's saved alternate or that instance's session mapping
+confirms the identity. Unknown aliases remain unconfirmed; LID digits are never
+interpreted as phone numbers. Future-proof wrappers such as `associatedChildMessage`
+are normalized with the pinned Baileys utility for delivery while preserving the
+original envelope in Evolution storage. An already-null stored payload cannot be
+reconstructed from the message ID alone.

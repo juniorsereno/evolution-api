@@ -3,6 +3,8 @@ import {
   type Contact,
   type GroupParticipant,
   isJidGroup,
+  isLidUser,
+  isPnUser,
   jidNormalizedUser,
   type MessageUserReceiptUpdate,
   type WAMessageKey,
@@ -77,11 +79,34 @@ function groupStatus(
   return 'SERVER_ACK';
 }
 
+function receiptChatJid(jid: string): string {
+  return jidNormalizedUser(jid)
+    .replace(/@hosted\.lid$/, '@lid')
+    .replace(/@hosted$/, '@s.whatsapp.net');
+}
+
 export class MessageReceiptService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly mysql: boolean,
+    private readonly resolveLid: (lid: string) => Promise<string | null>,
   ) {}
+
+  private async sameChat(receivedJid: string, storedJids: string[]): Promise<boolean> {
+    const received = receiptChatJid(receivedJid);
+    const stored = storedJids.map(receiptChatJid);
+    if (!received) return false;
+    if (stored.includes(received)) return true;
+    if (isJidGroup(received) || stored.some(isJidGroup)) return false;
+
+    const phone = isLidUser(received) ? receiptChatJid((await this.resolveLid(received)) || '') : received;
+    if (!isPnUser(phone)) return false;
+    for (const jid of stored) {
+      const expected = isLidUser(jid) ? receiptChatJid((await this.resolveLid(jid)) || '') : jid;
+      if (phone === expected) return true;
+    }
+    return false;
+  }
 
   async record(
     instanceId: string,
@@ -109,7 +134,8 @@ export class MessageReceiptService {
         }
         const fromMe = typeof stored.fromMe === 'boolean' ? stored.fromMe : key.fromMe;
         if (typeof fromMe !== 'boolean') throw new Error('Missing WhatsApp message direction');
-        if (key.remoteJid && ![stored.remoteJid, stored.remoteJidAlt].includes(key.remoteJid)) return null;
+        const storedJids = [stored.remoteJid, stored.remoteJidAlt].filter((jid) => typeof jid === 'string');
+        if (key.remoteJid && !(await this.sameChat(key.remoteJid, storedJids))) return null;
         const group = isJidGroup(stored.remoteJid);
         if (participant && (!group || !fromMe)) return null;
         const member = participant ? jidNormalizedUser(participant) : key.participant || null;

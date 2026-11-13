@@ -94,7 +94,7 @@ test('only all send-time recipients can advance the group-wide delivery and read
 test('concurrent participant receipts and duplicates converge without regressions or duplicate history', async () => {
   const { MessageReceiptService } = require('../dist/api/integrations/channel/whatsapp/message-receipt.service');
   const saved = await message('concurrent-members', group, true, { groupReceiptRecipients: [['100000000002@lid'], ['100000000003@lid']] });
-  const service = new MessageReceiptService(prisma, false);
+  const service = new MessageReceiptService(prisma, false, async () => null);
   const key = { id: 'concurrent-members', remoteJid: group, fromMe: true };
   await Promise.all(Array.from({ length: 6 }, (_, i) => service.record(instance.id, key, 'READ', true, i % 2 ? '100000000002@lid' : '100000000003@lid')));
   assert.equal(await prisma.messageUpdate.count({ where: { messageId: saved.id } }), 2);
@@ -106,7 +106,7 @@ test('receipts for another conversation or instance cannot change this message',
   const { dispatch } = receiver();
   await dispatch({ 'message-receipt.update': [receipt('scoped-receipt', '100000000002@lid', 'readTimestamp', '120363000000002@g.us')] });
   const { MessageReceiptService } = require('../dist/api/integrations/channel/whatsapp/message-receipt.service');
-  assert.equal(await new MessageReceiptService(prisma, false).record('another-instance', { id: 'scoped-receipt' }, 'READ', true), null);
+  assert.equal(await new MessageReceiptService(prisma, false, async () => null).record('another-instance', { id: 'scoped-receipt' }, 'READ', true), null);
   assert.equal(await prisma.messageUpdate.count({ where: { messageId: saved.id } }), 0);
   assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'PENDING');
 });
@@ -149,4 +149,72 @@ test('invalid timestamps are not interpreted as delivery or read confirmations',
   const saved = await prisma.message.findFirst({ where: { instanceId: instance.id, key: { path: ['id'], equals: 'send-snapshot' } } });
   assert.deepEqual(saved.groupReceiptRecipients, [['100000000002@lid', phone]]);
   assert.equal(saved.chatwootMessageParts, 2);
+});
+
+test('a verified LID receipt advances the original phone-addressed message', async () => {
+  const saved = await message('phone-send-lid-receipt', phone);
+  const { subject, dispatch } = receiver();
+  subject.client.signalRepository = { lidMapping: { getPNForLID: async lid => lid === '100000000002@lid' ? phone : null } };
+  await dispatch({ 'messages.update': [{ key: { id: 'phone-send-lid-receipt', fromMe: true, remoteJid: '100000000002@lid' }, update: { status: 3 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'DELIVERY_ACK');
+  const updates = await prisma.messageUpdate.findMany({ where: { messageId: saved.id } });
+  assert.deepEqual(updates.map(row => [row.remoteJid, row.status]), [[phone, 'DELIVERY_ACK']]);
+});
+
+test('a phone receipt resolves an original LID key through the same session mapping', async () => {
+  const saved = await message('lid-send-phone-receipt', '100000000002@lid');
+  const { subject, dispatch } = receiver();
+  subject.client.signalRepository = { lidMapping: { getPNForLID: async lid => lid === '100000000002@lid' ? phone : null } };
+  await dispatch({ 'messages.update': [{ key: { id: 'lid-send-phone-receipt', fromMe: true, remoteJid: phone }, update: { status: 4 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'READ');
+  assert.equal((await prisma.messageUpdate.findFirst({ where: { messageId: saved.id } })).remoteJid, '100000000002@lid');
+});
+
+test('hosted and device-specific aliases retain the same verified recipient', async () => {
+  const saved = await message('hosted-receipt', phone);
+  const { subject, dispatch } = receiver();
+  subject.client.signalRepository = { lidMapping: { getPNForLID: async lid => lid === '100000000002@lid' ? '12025550102:0@s.whatsapp.net' : null } };
+  await dispatch({ 'messages.update': [{ key: { id: 'hosted-receipt', remoteJid: '100000000002:7@hosted.lid' }, update: { status: 3 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'DELIVERY_ACK');
+  await dispatch({ 'messages.update': [{ key: { id: 'hosted-receipt', remoteJid: '12025550102:8@hosted' }, update: { status: 4 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'READ');
+});
+
+test('unknown, unrelated and non-phone LID mappings cannot confirm another chat', async () => {
+  const saved = await message('unverified-alias', phone);
+  const { subject, dispatch } = receiver();
+  for (const mapping of [null, '12025550103@s.whatsapp.net', '120363000000001@g.us']) {
+    subject.client.signalRepository = { lidMapping: { getPNForLID: async () => mapping } };
+    await dispatch({ 'messages.update': [{ key: { id: 'unverified-alias', remoteJid: '100000000002@lid' }, update: { status: 4 } }] });
+  }
+  await dispatch({ 'messages.update': [{ key: { id: 'unverified-alias', remoteJid: '12025550103@s.whatsapp.net' }, update: { status: 4 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'PENDING');
+  assert.equal(await prisma.messageUpdate.count({ where: { messageId: saved.id } }), 0);
+});
+
+test('an alternate already saved in the message key works without another mapping lookup', async () => {
+  const saved = await message('recorded-alias', phone, true, { key: { id: 'recorded-alias', remoteJid: phone, remoteJidAlt: '100000000002@lid', fromMe: true } });
+  const { subject, dispatch } = receiver();
+  subject.client.signalRepository = { lidMapping: { getPNForLID: async () => { throw Error('Mapping should already be known'); } } };
+  await dispatch({ 'messages.update': [{ key: { id: 'recorded-alias', remoteJid: '100000000002:4@lid' }, update: { status: 4 } }] });
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'READ');
+});
+
+test('each instance uses its own identity mapping even when WhatsApp message IDs coincide', async () => {
+  const primary = await message('shared-alias-id', phone);
+  const other = await prisma.instance.create({ data: { name: 'synthetic-other-receipt-alias' } });
+  try {
+    const secondary = await prisma.message.create({ data: { instanceId: other.id, key: { id: 'shared-alias-id', remoteJid: '12025550103@s.whatsapp.net', fromMe: true }, message: { conversation: 'Synthetic' }, messageType: 'conversation', source: 'web', messageTimestamp: 1700000000, status: 'PENDING' } });
+    const one = receiver(), two = receiver();
+    Object.assign(two.subject.instance, { id: other.id, name: other.name });
+    one.subject.client.signalRepository = { lidMapping: { getPNForLID: async () => phone } };
+    two.subject.client.signalRepository = { lidMapping: { getPNForLID: async () => '12025550103@s.whatsapp.net' } };
+    const event = { 'messages.update': [{ key: { id: 'shared-alias-id', remoteJid: '100000000002@lid' }, update: { status: 3 } }] };
+    await one.dispatch(event);
+    assert.equal((await prisma.message.findUnique({ where: { id: secondary.id } })).status, 'PENDING');
+    await two.dispatch(event);
+    assert.equal((await prisma.message.findUnique({ where: { id: primary.id } })).status, 'DELIVERY_ACK');
+    assert.equal((await prisma.message.findUnique({ where: { id: secondary.id } })).status, 'DELIVERY_ACK');
+    assert.equal(await prisma.messageUpdate.count({ where: { instanceId: other.id } }), 1);
+  } finally { await prisma.instance.delete({ where: { id: other.id } }); }
 });
