@@ -257,3 +257,31 @@ When both `CACHE_REDIS_ENABLED=true` and `CACHE_REDIS_SAVE_INSTANCES=true`, the 
 Baileys now updates its Signal key cache only after the underlying store confirms the write, retaining the existing mutex. This is the bounded H6 write-order adaptation from WhiskeySockets/Baileys #2574 (`40e7ec7bf0e8f5e815226bcc6d88a0ee8049543a`), without importing LockManager, the transaction rewrite or Signal/Noise changes.
 
 A credentials-save failure from a socket event is explicitly logged as `auth.credentials.persistence.failed` without credential content. Already decrypted messages in the same event continue through the existing delivery path. This does not add a credentials retry scheduler or make multi-key Redis writes atomic; it does not guarantee persistence during an outage. Key-write errors can reach Baileys transaction/retry handling, and failed session removal is reported instead of acknowledged as completed. Back up session storage and retain the prior image before a separately authorized deployment.
+
+### Received templates and polls in Vartana
+
+Hydrated templates are displayed as ordinary messages containing the title, body,
+footer and button labels. Image, video and document headers use the existing
+attachment upload path, retaining their captions and filenames. Button URLs and
+telephone numbers are shown as text; no button action is executed or fetched by
+Evolution. Poll creation messages (V1–V3) display the question and named options;
+voting and interactive replies are not implemented. Received labels are escaped
+before Markdown rendering. Unsupported templates and incomplete polls remain
+stored and pending. The original WhatsApp envelope and source-ID deduplication
+are preserved, including when a pending message is replayed after deployment.
+Quoted-message lookup is restricted to the current instance.
+
+### Durable delivery/read reconciliation
+
+Outgoing delivery/read receipts set a durable `chatwootReceiptPending` marker.
+The existing startup and one-minute reconciliation loop retries pending status
+updates after an HTTP failure or restart, using the recorded WhatsApp status and
+existing destination/attachment checks. It does not resend the message or infer a
+read receipt. An older in-flight HTTP response cannot clear a newer pending
+receipt. Disabled integrations retain pending work.
+
+The additive PostgreSQL/MySQL migration defaults historical records to not
+pending and adds an instance-scoped queue index. Historical discrepancies require
+verified, targeted reconciliation; deployment does not sweep all old messages.
+Retain a database backup and the previous image before deployment. Rolling back
+the application can retain this column and its queue for a later retry.

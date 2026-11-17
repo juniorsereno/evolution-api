@@ -14,7 +14,7 @@ const prisma = new PrismaClient();
 const app = new Pool({connectionString:process.env.CHATWOOT_IMPORT_DATABASE_CONNECTION_URI});
 const phone='5511999999999@s.whatsapp.net', lid='1234567890123456@lid';
 const services=[], receivers=[];
-let instance, server, provider, mapped, failHttp, posts, attachmentSeen;
+let instance, server, provider, mapped, failHttp, posts, attachmentSeen, lastPostedBody;
 const cache=()=>{const data=new Map(); return {has:async k=>data.has(k),get:async k=>data.get(k),set:async(k,v)=>data.set(k,v),delete:async k=>data.delete(k)};};
 before(async()=>{
  instance=await prisma.instance.create({data:{name:'synthetic-delivery'}});
@@ -29,7 +29,7 @@ before(async()=>{
   else if(req.url.endsWith('/inboxes'))response={payload:[{id:30,name:'Synthetic'}]};
   else if(req.url.endsWith('/contacts/17/conversations'))response={payload:[{id:42,inbox_id:30,status:'open'}]};
   else if(req.url.endsWith('/conversations/42/messages')){
-   posts++;
+   posts++;lastPostedBody=body;
    if(failHttp){res.writeHead(503);res.end('{}');return;}
    const saved=await app.query(`INSERT INTO messages(account_id,inbox_id,conversation_id,content,source_id,message_type,created_at,updated_at)
     VALUES(6,30,42,$1,$2,0,NOW(),NOW()) RETURNING id`,[body.content,body.source_id]);
@@ -46,7 +46,7 @@ before(async()=>{
  INSERT INTO conversations(id,display_id,account_id,inbox_id,status,created_at,updated_at) VALUES(42,42,6,30,0,NOW(),NOW());
  UPDATE conversations SET display_id=42 WHERE id=42;`);
 });
-beforeEach(async()=>{mapped=phone;failHttp=false;posts=0;attachmentSeen=false;await prisma.message.deleteMany({where:{instanceId:instance.id}});await app.query('DELETE FROM messages');});
+beforeEach(async()=>{mapped=phone;failHttp=false;posts=0;attachmentSeen=false;lastPostedBody=null;await prisma.message.deleteMany({where:{instanceId:instance.id}});await app.query('DELETE FROM messages');});
 after(async()=>{
  for(const r of receivers)r.messageProcessor.onDestroy();
  server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
@@ -231,4 +231,52 @@ test('an associated child with no decoded message remains stored and pending',as
  await prisma.message.update({where:{id:m.id},data:{messageType:'associatedChildMessage',message:envelope}});
  await s.replayPendingMessages(scope());
  assert.equal(posts,0);const saved=await prisma.message.findUnique({where:{id:m.id}});assert.equal(saved.chatwootDeliveryPending,true);assert.deepEqual(saved.message,envelope);
+});
+
+test('a hydrated template displays its image, text and button names as one ordinary message',async()=>{
+ const s=subject(),m=await pending(s,'template-display',phone);
+ const envelope={templateMessage:{hydratedTemplate:{hydratedContentText:'Oferta recebida',imageMessage:{mimetype:'image/png'},hydratedButtons:[{urlButton:{displayText:'Detalhes',url:'https://example.com/oferta'}},{quickReplyButton:{displayText:'Falar com atendente',id:'do-not-execute'}}]}}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'templateMessage',message:envelope}});
+ await s.replayPendingMessages(scope());await s.replayPendingMessages(scope());
+ assert.equal(posts,1);assert.equal(attachmentSeen,true);
+ const row=(await app.query('SELECT content,source_id FROM messages')).rows[0];
+ for(const text of ['Oferta recebida','Detalhes','https://example.com/oferta','Falar com atendente'])assert.ok(row.content.includes(text),text);
+ assert.equal(row.source_id,'WAID:template-display');assert.equal(row.content.includes('do-not-execute'),false);
+ assert.deepEqual((await prisma.message.findUnique({where:{id:m.id}})).message,envelope);
+});
+
+test('poll question and options are displayed without enabling voting',async()=>{
+ const s=subject(),m=await pending(s,'poll-display',phone);
+ const envelope={pollCreationMessageV3:{name:'Qual horário?',options:[{optionName:'Manhã'},{optionName:'Tarde'}],selectableOptionsCount:1}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'pollCreationMessageV3',message:envelope}});
+ await s.replayPendingMessages(scope());await s.replayPendingMessages(scope());
+ assert.equal(posts,1);const row=(await app.query('SELECT content FROM messages')).rows[0];
+ for(const text of ['Qual horário?','1. Manhã','2. Tarde'])assert.ok(row.content.includes(text));
+ assert.deepEqual((await prisma.message.findUnique({where:{id:m.id}})).message,envelope);
+});
+
+test('button labels cannot manufacture Markdown links and no button destination is fetched',async()=>{
+ const s=subject(),m=await pending(s,'unsafe-template',phone);
+ const envelope={templateMessage:{hydratedFourRowTemplate:{hydratedContentText:'Aviso',hydratedFooterText:'Rodapé',hydratedButtons:[{urlButton:{displayText:'[Clique](javascript:alert(1)) <img onerror=alert(2)>',url:'javascript:alert(3)'}},{callButton:{displayText:'Ligar',phoneNumber:'+12025550102'}}]}}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'templateMessage',message:envelope}});
+ await s.replayPendingMessages(scope());assert.equal(posts,1);
+ const content=(await app.query('SELECT content FROM messages')).rows[0].content;
+ assert.ok(content.includes('Rodapé'));assert.ok(content.includes('Ligar'));assert.ok(content.includes('\\[Clique\\]'));assert.ok(content.includes('\\<img'));
+ assert.equal((await prisma.message.findUnique({where:{id:m.id}})).chatwootDeliveryPending,false);
+});
+
+test('incomplete polls are retained rather than inventing options or dropping the message',async()=>{
+ const s=subject(),m=await pending(s,'poll-incomplete',phone);const envelope={pollCreationMessageV3:{name:'Pergunta'}};
+ await prisma.message.update({where:{id:m.id},data:{messageType:'pollCreationMessageV3',message:envelope}});
+ await s.replayPendingMessages(scope());assert.equal(posts,0);const saved=await prisma.message.findUnique({where:{id:m.id}});assert.equal(saved.chatwootDeliveryPending,true);assert.deepEqual(saved.message,envelope);
+});
+
+test('a template cannot quote a message owned by another instance',async()=>{
+ const other=await prisma.instance.create({data:{name:'synthetic-template-foreign'}});
+ try{
+  await prisma.message.create({data:{...data('foreign-quote',phone),instanceId:other.id,chatwootMessageId:7777}});
+  const s=subject(),m=await pending(s,'template-quote',phone);const context={stanzaId:'foreign-quote'};
+  await prisma.message.update({where:{id:m.id},data:{messageType:'templateMessage',contextInfo:context,message:{templateMessage:{contextInfo:context,hydratedTemplate:{hydratedContentText:'Synthetic',imageMessage:{mimetype:'image/png'}}}}}});
+  await s.replayPendingMessages(scope());assert.equal(posts,1);assert.equal(lastPostedBody.source_reply_id,undefined);
+ }finally{await prisma.instance.delete({where:{id:other.id}});}
 });

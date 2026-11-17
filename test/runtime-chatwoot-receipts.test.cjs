@@ -189,3 +189,48 @@ test('verified PN/LID receipts update the mapped Vartana message without resendi
   ]);
   assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).status, 'READ');
 });
+
+test('a failed status PATCH stays durable and is retried without another WhatsApp receipt', async () => {
+ const saved=await message('durable-receipt-retry');
+ failHttp=true;
+ await assert.rejects(record(saved,'READ'));
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,true);
+ failHttp=false;
+ await service.replayPendingReceiptStatuses(scope(first));
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,false);
+ assert.deepEqual(requests.map(r=>r.body.status),['read','read']);
+});
+
+test('a receipt received before the Vartana mapping is delivered after linking', async () => {
+ const saved=await message('late-cw-mapping');
+ await prisma.message.update({where:{id:saved.id},data:{chatwootMessageId:null,chatwootConversationId:null}});
+ await receipts.record(saved.instanceId,saved.key,'READ',true);
+ await service.replayPendingReceiptStatuses(scope(first));assert.equal(requests.length,0);
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,true);
+ await prisma.message.update({where:{id:saved.id},data:{chatwootMessageId:9001,chatwootConversationId:42}});
+ const restarted=new ChatwootService({waInstances:{[first.name]:{findChatwoot:async()=>providers.get(first.name)}}},configService,prisma,{has:async()=>false,set(){}});
+ await restarted.replayPendingReceiptStatuses(scope(first));
+ assert.deepEqual(requests.map(r=>r.body.status),['read']);
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,false);
+});
+
+test('an older HTTP response cannot clear a newer read receipt',async()=>{
+ const saved=await message('receipt-http-race');await receipts.record(saved.instanceId,saved.key,'DELIVERY_ACK',true);
+ holdHttp=true;const inFlight=service.syncMessageReceiptStatus(scope(first),saved.id);await waitForRequests(1);
+ await receipts.record(saved.instanceId,saved.key,'READ',true);
+ for(const res of heldResponses){res.writeHead(200,{'Content-Type':'application/json'});res.end('{}');}
+ await inFlight;
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,true);
+ holdHttp=false;await service.replayPendingReceiptStatuses(scope(first));
+ assert.deepEqual(requests.map(r=>r.body.status),['delivered','read']);
+ assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,false);
+});
+
+test('receipt replay rejects mismatched identity and retains disabled integrations for later',async()=>{
+ const saved=await message('receipt-isolation');await receipts.record(saved.instanceId,saved.key,'READ',true);
+ await assert.rejects(service.replayPendingReceiptStatuses({instanceName:second.name,instanceId:first.id}),/instance mismatch/);
+ await service.replayPendingReceiptStatuses(scope(second));assert.equal(requests.length,0);
+ const p=providers.get(first.name);p.enabled=false;
+ try{await service.replayPendingReceiptStatuses(scope(first));assert.equal(requests.length,0);assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,true);}finally{p.enabled=true;}
+ await service.replayPendingReceiptStatuses(scope(first));assert.deepEqual(requests.map(r=>r.body.status),['read']);
+});

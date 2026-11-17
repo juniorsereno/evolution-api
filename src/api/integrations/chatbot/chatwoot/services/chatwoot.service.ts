@@ -4,6 +4,7 @@ import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import { phoneJid, prepareHistoryContacts } from '@api/integrations/chatbot/chatwoot/utils/history-contact';
+import { receivedContent } from '@api/integrations/chatbot/chatwoot/utils/received-content';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -22,7 +23,7 @@ import {
 import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
-import { normalizeMessageContent, WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
+import { getContentType, normalizeMessageContent, WAMessage, WAMessageContent, WAMessageKey } from 'baileys';
 import { createHash } from 'crypto';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
@@ -1783,7 +1784,13 @@ export class ChatwootService {
     }
     const related = await this.prismaRepository.message.findMany({
       where: { instanceId: instance.instanceId, chatwootMessageId: message.chatwootMessageId },
-      select: { status: true, chatwootConversationId: true, chatwootInboxId: true, chatwootMessageParts: true },
+      select: {
+        id: true,
+        status: true,
+        chatwootConversationId: true,
+        chatwootInboxId: true,
+        chatwootMessageParts: true,
+      },
     });
     if (
       related.some(
@@ -1801,11 +1808,75 @@ export class ChatwootService {
         ? 'delivered'
         : null;
     if (!status) return null;
-    return axios.patch(
+    const response = await axios.patch(
       `${provider.url.replace(/\/$/, '')}/api/v1/accounts/${encodeURIComponent(provider.accountId)}/conversations/${message.chatwootConversationId}/messages/${message.chatwootMessageId}`,
       { status },
       { headers: { api_access_token: provider.token }, timeout: 15000 },
     );
+    // Do not clear a newer receipt that arrived while this HTTP request was in flight.
+    await this.prismaRepository.$transaction(
+      related.map((row) =>
+        this.prismaRepository.message.updateMany({
+          where: {
+            id: row.id,
+            instanceId: instance.instanceId,
+            status: row.status,
+            chatwootMessageId: message.chatwootMessageId,
+            chatwootConversationId: row.chatwootConversationId,
+            chatwootInboxId: row.chatwootInboxId,
+          },
+          data: { chatwootReceiptPending: false },
+        }),
+      ),
+    );
+    return response;
+  }
+
+  private readonly reconcilingReceiptInstances = new Set<string>();
+
+  public async replayPendingReceiptStatuses(instance: InstanceDto): Promise<void> {
+    if (!instance.instanceId) throw new Error('Missing instance ID for receipt reconciliation');
+    const target = await this.prismaRepository.instance.findFirst({
+      where: { id: instance.instanceId, name: instance.instanceName },
+      select: { id: true },
+    });
+    if (!target) throw new Error('Receipt reconciliation instance mismatch');
+    if (this.reconcilingReceiptInstances.has(instance.instanceId)) return;
+    this.reconcilingReceiptInstances.add(instance.instanceId);
+    try {
+      if (!this.configService.get<Chatwoot>('CHATWOOT').ENABLED || !(await this.getProvider(instance))?.enabled) return;
+      let cursor: string | undefined;
+      for (;;) {
+        const messages = await this.prismaRepository.message.findMany({
+          where: {
+            instanceId: instance.instanceId,
+            chatwootReceiptPending: true,
+            chatwootMessageId: { not: null },
+            chatwootConversationId: { not: null },
+            ...(cursor ? { id: { gt: cursor } } : {}),
+          },
+          orderBy: { id: 'asc' },
+          take: 100,
+          select: { id: true },
+        });
+        if (!messages.length) break;
+        for (const message of messages) {
+          cursor = message.id;
+          try {
+            await this.syncMessageReceiptStatus(instance, message.id);
+          } catch (error) {
+            this.logger.error({
+              event: 'chatwoot.receipt.reconcile.failed',
+              instanceId: instance.instanceId,
+              recordId: message.id,
+              cause: error instanceof Error ? error.name : 'Unknown',
+            });
+          }
+        }
+      }
+    } finally {
+      this.reconcilingReceiptInstances.delete(instance.instanceId);
+    }
   }
 
   private async getMessageByKeyId(instance: InstanceDto, keyId: string): Promise<MessageModel> {
@@ -2196,7 +2267,8 @@ export class ChatwootService {
           return;
         }
 
-        body = { ...body, message: normalizeMessageContent(body.message) ?? body.message };
+        const content = receivedContent(normalizeMessageContent(body.message) ?? body.message);
+        body = { ...body, message: content, messageType: getContentType(content) ?? body.messageType };
 
         const originalMessage = await this.getConversationMessage(body.message);
         const bodyMessage = originalMessage
@@ -2217,6 +2289,7 @@ export class ChatwootService {
         if (quotedId)
           quotedMsg = await this.prismaRepository.message.findFirst({
             where: {
+              instanceId: instance.instanceId,
               key: {
                 path: ['id'],
                 equals: quotedId,

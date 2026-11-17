@@ -194,10 +194,12 @@ model Message {
 
   chatwootDeliveryPending Boolean @default(false)
   chatwootDeliveryTarget String? @db.VarChar(64)
+  chatwootReceiptPending Boolean @default(false)
   groupReceiptRecipients Json? @db.JsonB
   chatwootMessageParts Int? @db.Integer
 
   @@index([instanceId, chatwootDeliveryPending, id])
+  @@index([instanceId, chatwootReceiptPending, id])
   @@index([instanceId])
 }
 
