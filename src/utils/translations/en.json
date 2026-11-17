@@ -27,5 +27,7 @@
   "cw.import.batchReceived": "History batch received from WhatsApp. Messages: {{messages}}, chats: {{chats}}, contacts: {{contacts}}. Progress reported by WhatsApp: {{progress}}. Processing the data for the connected inbox.",
   "cw.import.batchSaved": "Batch processed. New messages saved in the inbox: {{imported}}. Messages awaiting phone identification: {{retained}}. Progress reported by WhatsApp: {{progress}}. Existing messages or messages outside the configured period are not imported again.",
   "cw.import.batchFailed": "This history batch could not be fully processed. Its import into the inbox was not confirmed.",
-  "cw.import.progressUnknown": "not reported"
+  "cw.import.progressUnknown": "not reported",
+  "cw.received.buttons": "Buttons",
+  "cw.received.poll": "Poll"
 }

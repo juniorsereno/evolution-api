@@ -4904,6 +4904,10 @@ export class BaileysStartupService extends ChannelStartupService {
       const chatwootConfig = await this.findChatwoot();
       const prepare = (message: any) => this.prepareMessage(message);
       await this.chatwootService.replayPendingMessages({ instanceName: this.instance.name });
+      await this.chatwootService.replayPendingReceiptStatuses({
+        instanceName: this.instance.name,
+        instanceId: this.instanceId,
+      });
       this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
 
       // Generate ID for this cron task and store in cache
@@ -4923,6 +4927,10 @@ export class BaileysStartupService extends ChannelStartupService {
           }
         }
         await this.chatwootService.replayPendingMessages({ instanceName: this.instance.name });
+        await this.chatwootService.replayPendingReceiptStatuses({
+          instanceName: this.instance.name,
+          instanceId: this.instanceId,
+        });
         if (new Date().getMinutes() % 30 === 0) {
           this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
         }
