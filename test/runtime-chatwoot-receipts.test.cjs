@@ -54,8 +54,9 @@ after(async () => {
 });
 const scope = instance => ({ instanceName: instance.name, instanceId: instance.id });
 async function message(id, { instance = first, remoteJid = phone, cw = 9001, snapshot, parts, status = 'PENDING' } = {}) {
-  const account = providers.get(instance.name).accountId;
-  const saved = await prisma.message.create({ data: { instanceId: instance.id, key: { id, remoteJid, fromMe: true }, message: { conversation: 'Synthetic' }, messageType: 'conversation', source: 'web', messageTimestamp: 1700000000, status, chatwootMessageParts: parts, chatwootMessageId: cw, chatwootInboxId: 30, chatwootConversationId: 42, ...(snapshot ? { groupReceiptRecipients: snapshot } : {}) } });
+  const provider = providers.get(instance.name);
+  const account = provider.accountId;
+  const saved = await prisma.message.create({ data: { instanceId: instance.id, key: { id, remoteJid, fromMe: true }, message: { conversation: 'Synthetic' }, messageType: 'conversation', source: 'web', messageTimestamp: 1700000000, status, chatwootMessageParts: parts, chatwootMessageId: cw, chatwootInboxId: 30, chatwootConversationId: 42, chatwootDeliveryTarget: service.deliveryTarget(provider), ...(snapshot ? { groupReceiptRecipients: snapshot } : {}) } });
   await prisma.messageOrigin.create({ data: { instanceId: instance.id, messageId: id, origin: 'chatwoot', chatwootAccountId: account, chatwootMessageId: cw, chatwootInboxId: 30, chatwootConversationId: 42 } });
   return saved;
 }
@@ -162,13 +163,17 @@ test('the Vartana webhook passes the complete attachment count to every WhatsApp
   const origins = [];
   webhook.getQuotedMessage = async () => undefined;
   webhook.sendAttachment = async (_wa, _chat, _media, _caption, _options, origin) => { origins.push(origin); return { key: { id: 'synthetic-part-' + origins.length } }; };
-  webhook.updateChatwootMessageId = async () => {};
+  const destinations = [];
+  webhook.updateChatwootMessageId = async (_message, _mapping, _instance, destination) => {
+    destinations.push(destination);
+  };
   const result = await webhook.receiveWebhook(scope(first), {
     id: 9001, event: 'message_created', message_type: 'outgoing', content: 'Synthetic', inbox: { id: 30 },
     conversation: { id: 42, meta: { sender: { identifier: group } }, messages: [{ attachments: [{ data_url: 'https://example.invalid/a.pdf' }, { data_url: 'https://example.invalid/b.pdf' }] }] },
   });
   assert.equal(origins.length, 2);
   assert.deepEqual(origins.map(origin => origin.expectedParts), [2, 2]);
+  assert.deepEqual(destinations, Array(2).fill(service.deliveryTarget(providers.get(first.name))));
   assert.notEqual(result, null);
 });
 
@@ -233,4 +238,34 @@ test('receipt replay rejects mismatched identity and retains disabled integratio
  const p=providers.get(first.name);p.enabled=false;
  try{await service.replayPendingReceiptStatuses(scope(first));assert.equal(requests.length,0);assert.equal((await prisma.message.findUnique({where:{id:saved.id}})).chatwootReceiptPending,true);}finally{p.enabled=true;}
  await service.replayPendingReceiptStatuses(scope(first));assert.deepEqual(requests.map(r=>r.body.status),['read']);
+});
+
+test('receipt reconciliation waits for the original configured destination', async () => {
+  const saved = await message('external-receipt-with-target', { status: 'DELIVERY_ACK' });
+  const provider = providers.get(first.name);
+  const nameInbox = provider.nameInbox;
+  await prisma.messageOrigin.deleteMany({ where: { instanceId: first.id, messageId: saved.key.id } });
+  await receipts.record(saved.instanceId, saved.key, 'READ', true);
+
+  provider.nameInbox = 'Synthetic replacement inbox';
+  try {
+    await service.replayPendingReceiptStatuses(scope(first));
+    assert.deepEqual(requests, []);
+    assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).chatwootReceiptPending, true);
+  } finally {
+    provider.nameInbox = nameInbox;
+  }
+
+  await service.replayPendingReceiptStatuses(scope(first));
+  assert.deepEqual(requests.map(request => request.body.status), ['read']);
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).chatwootReceiptPending, false);
+});
+
+test('an older mapping without a destination fingerprint cannot be retried automatically', async () => {
+  const saved = await message('legacy-receipt', { status: 'DELIVERY_ACK' });
+  await prisma.message.update({ where: { id: saved.id }, data: { chatwootDeliveryTarget: null } });
+  await receipts.record(saved.instanceId, saved.key, 'READ', true);
+  await service.replayPendingReceiptStatuses(scope(first));
+  assert.deepEqual(requests, []);
+  assert.equal((await prisma.message.findUnique({ where: { id: saved.id } })).chatwootReceiptPending, true);
 });

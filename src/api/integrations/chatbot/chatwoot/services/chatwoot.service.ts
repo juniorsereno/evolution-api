@@ -1411,15 +1411,14 @@ export class ChatwootService {
     try {
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      const client = await this.clientCw(instance);
+      const provider = await this.getProvider(instance);
+      if (!provider) return null;
 
-      if (!client) {
-        this.logger.warn('client not found');
-        return null;
-      }
+      this.provider = provider;
+      const deliveryTarget = this.deliveryTarget(provider);
 
       if (
-        this.provider.reopenConversation === false &&
+        provider.reopenConversation === false &&
         body.event === 'conversation_status_changed' &&
         body.status === 'resolved' &&
         body.meta?.sender?.identifier
@@ -1558,7 +1557,7 @@ export class ChatwootService {
 
         const origin: OutboundOrigin = {
           kind: 'chatwoot',
-          accountId: this.provider.accountId,
+          accountId: provider.accountId,
           messageId: body.id,
           inboxId: body.inbox.id,
           conversationId: body.conversation.id,
@@ -1571,10 +1570,8 @@ export class ChatwootService {
         if (senderName === null || senderName === undefined) {
           formatText = messageReceived;
         } else {
-          const formattedDelimiter = this.provider.signDelimiter
-            ? this.provider.signDelimiter.replaceAll('\\n', '\n')
-            : '\n';
-          const textToConcat = this.provider.signMsg ? [`*${senderName}:*`] : [];
+          const formattedDelimiter = provider.signDelimiter ? provider.signDelimiter.replace(/\\n/g, '\n') : '\n';
+          const textToConcat = provider.signMsg ? [`*${senderName}:*`] : [];
           textToConcat.push(messageReceived);
 
           formatText = textToConcat.join(formattedDelimiter);
@@ -1614,6 +1611,7 @@ export class ChatwootService {
                   contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
                 },
                 instance,
+                deliveryTarget,
               );
             }
           } else {
@@ -1648,6 +1646,7 @@ export class ChatwootService {
                   contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
                 },
                 instance,
+                deliveryTarget,
               );
             } catch (error) {
               if (!messageSent && body.conversation?.id) {
@@ -1727,6 +1726,7 @@ export class ChatwootService {
     message: MessageModel,
     chatwootMessageIds: ChatwootMessage,
     instance: InstanceDto,
+    deliveryTarget: string,
   ) {
     const key = message.key as WAMessageKey;
 
@@ -1741,6 +1741,7 @@ export class ChatwootService {
         "chatwootMessageId" = ${chatwootMessageIds.messageId},
         "chatwootConversationId" = ${chatwootMessageIds.conversationId},
         "chatwootInboxId" = ${chatwootMessageIds.inboxId},
+        "chatwootDeliveryTarget" = ${deliveryTarget},
         "chatwootContactInboxSourceId" = ${chatwootMessageIds.contactInboxSourceId},
         "chatwootIsRead" = ${chatwootMessageIds.isRead || false}
       WHERE "instanceId" = ${instance.instanceId} 
@@ -1763,8 +1764,9 @@ export class ChatwootService {
     if (!provider?.enabled) return null;
     if (!provider.accountId || !provider.url || !provider.token)
       throw new Error('Incomplete Chatwoot receipt configuration');
+    const deliveryTarget = this.deliveryTarget(provider);
     const message = await this.prismaRepository.message.findFirst({
-      where: { id: messageId, instanceId: instance.instanceId },
+      where: { id: messageId, instanceId: instance.instanceId, chatwootDeliveryTarget: deliveryTarget },
     });
     if (!message?.chatwootMessageId || !message.chatwootConversationId) return null;
     const key = message.key;
@@ -1783,7 +1785,11 @@ export class ChatwootService {
       throw new Error('Receipt mapping does not belong to the configured Chatwoot destination');
     }
     const related = await this.prismaRepository.message.findMany({
-      where: { instanceId: instance.instanceId, chatwootMessageId: message.chatwootMessageId },
+      where: {
+        instanceId: instance.instanceId,
+        chatwootMessageId: message.chatwootMessageId,
+        chatwootDeliveryTarget: deliveryTarget,
+      },
       select: {
         id: true,
         status: true,
@@ -1822,6 +1828,7 @@ export class ChatwootService {
             instanceId: instance.instanceId,
             status: row.status,
             chatwootMessageId: message.chatwootMessageId,
+            chatwootDeliveryTarget: deliveryTarget,
             chatwootConversationId: row.chatwootConversationId,
             chatwootInboxId: row.chatwootInboxId,
           },
@@ -1844,13 +1851,17 @@ export class ChatwootService {
     if (this.reconcilingReceiptInstances.has(instance.instanceId)) return;
     this.reconcilingReceiptInstances.add(instance.instanceId);
     try {
-      if (!this.configService.get<Chatwoot>('CHATWOOT').ENABLED || !(await this.getProvider(instance))?.enabled) return;
+      if (!this.configService.get<Chatwoot>('CHATWOOT').ENABLED) return;
+      const provider = await this.getProvider(instance);
+      if (!provider?.enabled) return;
+      const deliveryTarget = this.deliveryTarget(provider);
       let cursor: string | undefined;
       for (;;) {
         const messages = await this.prismaRepository.message.findMany({
           where: {
             instanceId: instance.instanceId,
             chatwootReceiptPending: true,
+            chatwootDeliveryTarget: deliveryTarget,
             chatwootMessageId: { not: null },
             chatwootConversationId: { not: null },
             ...(cursor ? { id: { gt: cursor } } : {}),
