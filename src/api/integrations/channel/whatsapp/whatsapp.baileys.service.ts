@@ -264,6 +264,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
   private credentialPersistence?: CredentialPersistence;
+  private qrAttempt?: { client: WASocket; reference: string };
   private connectionTask?: Promise<WASocket>;
   private logoutTask?: Promise<void>;
   private removing = false;
@@ -389,7 +390,9 @@ export class BaileysStartupService extends ChannelStartupService {
     const isCurrent = () => !this.endSession && this.client === client;
     if (!isCurrent()) return;
     if (qr) {
-      if (this.instance.qrcode.count === this.configService.get<QrCode>('QRCODE').LIMIT) {
+      const [reference] = qr.split(',', 1);
+      const isRefresh = this.qrAttempt?.client === client && this.qrAttempt.reference === reference;
+      if (!isRefresh && this.instance.qrcode.count === this.configService.get<QrCode>('QRCODE').LIMIT) {
         this.sendDataWebhook(Events.QRCODE_UPDATED, {
           message: 'QR code limit reached, please login again',
           statusCode: DisconnectReason.badSession,
@@ -417,7 +420,9 @@ export class BaileysStartupService extends ChannelStartupService {
         return this.eventEmitter.emit('no.connection', this.instance.name);
       }
 
-      this.instance.qrcode.count++;
+      if (!isRefresh) this.instance.qrcode.count++;
+      const attempt = { client, reference };
+      this.qrAttempt = attempt;
 
       const color = this.configService.get<QrCode>('QRCODE').COLOR;
 
@@ -437,12 +442,12 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       qrcode.toDataURL(qr, optsQrcode, (error, base64) => {
+        if (!isCurrent() || this.qrAttempt !== attempt) return;
         if (error) {
           this.logger.error('Qrcode generate failed:' + error.toString());
           return;
         }
 
-        if (!isCurrent()) return;
         this.instance.qrcode.base64 = base64;
         this.instance.qrcode.code = qr;
 
@@ -531,6 +536,7 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'open') {
+      this.qrAttempt = undefined;
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
