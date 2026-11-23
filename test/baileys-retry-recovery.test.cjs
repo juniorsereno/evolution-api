@@ -32,7 +32,7 @@ before(async () => {
 });
 afterEach(async () => { for (const clear of cleanup.splice(0)) await clear(); });
 after(() => mock.restoreAll());
-async function create(receive = false, manager = false) {
+async function create(receive = false, manager = false, overrides = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-retry-fixture-'));
   const { state } = await useMultiFileAuthState(dir);
   const counters = new Map([['synthetic-retry:undefined', 2]]);
@@ -46,7 +46,7 @@ async function create(receive = false, manager = false) {
     ...defaults, auth: state, logger: pino({ level: 'silent' }), fireInitQueries: false,
     defaultQueryTimeoutMs: 100, connectTimeoutMs: 100, enableRecentMessageCache: manager,
     enableAutoSessionRecreation: false, msgRetryCounterCache: cache,
-    transactionOpts: { maxCommitRetries: 1, delayBetweenTriesMs: 1 },
+    transactionOpts: { maxCommitRetries: 1, delayBetweenTriesMs: 1 }, ...overrides,
   });
   const context = { nodes: [], failures: 0, hold: false, notify() {},
     ack(node) { sock.ws.emit('TAG:' + node.attrs.id, { tag: 'iq', attrs: { id: node.attrs.id, type: 'result' } }); } };
@@ -123,4 +123,24 @@ test('installed SDK prevents a retry from consuming a prekey in an unconfirmed u
   const key = binary.getBinaryNodeChild(binary.getBinaryNodeChild(receipt, 'keys'), 'key');
   const bytes = Buffer.from(binary.getBinaryNodeChild(key, 'id').content);
   assert.equal(bytes.readUIntBE(0, bytes.length), 3);
+});
+
+test('installed SDK persists a delayed privacy-token response outside the completed send transaction', async () => {
+  const { sock, state, context } = await create(true, false, { defaultQueryTimeoutMs: 2000, connectTimeoutMs: 2000 });
+  for (const user of ['123','456']) await sock.userDevicesCache.set(user, [{ user, device: 1, server: 's.whatsapp.net' }]);
+  mock.method(sock.signalRepository, 'validateSession', async () => ({ exists: true }));
+  mock.method(sock.signalRepository, 'encryptMessage', async () => ({ type: 'msg', ciphertext: Buffer.from('synthetic-encryption') }));
+  context.hold = true;
+  await sock.authState.keys.transaction(() => sock.relayMessage('456@s.whatsapp.net', { conversation: 'synthetic' }, { messageId: 'synthetic-token-send' }), 'parent-send');
+  for (let i=0;i<100 && !context.nodes.some(n=>n.attrs.xmlns==='privacy');i++) await new Promise(r=>setTimeout(r,5));
+  const iq = context.nodes.find(n=>n.attrs.xmlns==='privacy');
+  assert.ok(iq);
+  context.ack(iq);
+  let timestamp;
+  for (let i=0;i<100;i++) {
+    timestamp = (await state.keys.get('tctoken',['456@s.whatsapp.net']))['456@s.whatsapp.net']?.senderTimestamp;
+    if (timestamp) break;
+    await new Promise(r=>setTimeout(r,5));
+  }
+  assert.equal(typeof timestamp, 'number');
 });
