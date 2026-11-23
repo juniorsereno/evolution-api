@@ -5,9 +5,9 @@ const qrcode = require('qrcode');
 const { BaileysStartupService } = require('../dist/api/integrations/channel/whatsapp/whatsapp.baileys.service');
 const { configService } = require('../dist/config/env.config');
 
-const qr = (reference, secret) => `https://wa.me/settings/linked_devices#${reference},noise,identity,${secret},1`;
-
 test('refreshes an existing QR at the attempt limit and publishes only the current render', async (t) => {
+  const { buildPairingQRData } = await import('baileys');
+  const qr = (reference, secret) => buildPairingQRData(reference, 'noise', 'identity', secret, ['Windows', 'Desktop', '10']);
   const renders = new Map();
   t.mock.method(qrcode, 'toDataURL', (code, _options, callback) => renders.set(code, callback));
   const config = {
