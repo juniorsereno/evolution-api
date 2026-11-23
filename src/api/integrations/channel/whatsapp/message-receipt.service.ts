@@ -164,7 +164,13 @@ export class MessageReceiptService {
         if (!saveUpdates && participant) receipts.push({ participant: member, status });
         const next = group && participant ? groupStatus(message.groupReceiptRecipients, receipts) : status;
         const changed = (ranks[next] || 0) > (ranks[message.status] || 0);
-        if (changed) await tx.message.update({ where: { id: message.id }, data: { status: next } });
+        const receiptPending = fromMe && ranks[next] >= ranks.DELIVERY_ACK;
+        if (changed || receiptPending) {
+          await tx.message.update({
+            where: { id: message.id },
+            data: { ...(changed ? { status: next } : {}), ...(receiptPending ? { chatwootReceiptPending: true } : {}) },
+          });
+        }
         return { key: normalizedKey, data, recorded, changed, messageTimestamp: message.messageTimestamp };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
