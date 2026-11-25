@@ -38,6 +38,10 @@ export class ChatwootRouter extends RouterBroker {
           execute: (instance, data) => chatwootController.receiveWebhook(instance, data),
         });
 
+        if (response?.outboundError) {
+          return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: response.outboundError });
+        }
+
         res.status(HttpStatus.OK).json(response);
       });
   }
