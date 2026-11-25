@@ -161,6 +161,7 @@ import {
   ReceiptStatus,
   receiptStatus,
 } from './message-receipt.service';
+import { isRejectedPreKeyQuery } from './pre-key-query-error';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -2730,6 +2731,9 @@ export class BaileysStartupService extends ChannelStartupService {
       return messageRaw;
     } catch (error) {
       this.logger.error(error);
+      if (origin.kind === 'chatwoot' && origin.expectedParts === 1 && isRejectedPreKeyQuery(error)) {
+        throw error;
+      }
       throw new BadRequestException(error.toString());
     }
   }

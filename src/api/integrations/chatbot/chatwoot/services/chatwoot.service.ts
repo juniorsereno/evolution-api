@@ -1,5 +1,6 @@
 import { InstanceDto } from '@api/dto/instance.dto';
 import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
+import { isRejectedPreKeyQuery } from '@api/integrations/channel/whatsapp/pre-key-query-error';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
@@ -1649,7 +1650,7 @@ export class ChatwootService {
                 instance,
               );
             } catch (error) {
-              if (!messageSent && body.conversation?.id) {
+              if (!messageSent && body.conversation?.id && !isRejectedPreKeyQuery(error)) {
                 this.onSendMessageError(instance, body.conversation?.id, error);
               }
               throw error;
@@ -1717,6 +1718,10 @@ export class ChatwootService {
       return { message: 'bot' };
     } catch (error) {
       this.logger.error(error);
+
+      if (body?.event === 'message_created' && body.message_type === 'outgoing' && isRejectedPreKeyQuery(error)) {
+        return { outboundError: 'WhatsApp rejected the encryption key request' };
+      }
 
       return { message: 'bot' };
     }
