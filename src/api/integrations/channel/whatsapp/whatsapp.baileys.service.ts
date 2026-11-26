@@ -120,6 +120,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   MessageUpsertType,
   MiscMessageGenerationOptions,
+  normalizeMessageContent,
   ParticipantAction,
   prepareWAMessageMedia,
   Product,
@@ -154,6 +155,7 @@ import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
+import { decryptMessageEdit } from './encrypted-message-edit';
 import {
   captureGroupReceiptRecipients,
   MessageReceiptService,
@@ -622,6 +624,27 @@ export class BaileysStartupService extends ChannelStartupService {
     } catch {
       return { conversation: '' };
     }
+  }
+
+  private async readEncryptedEdit(
+    received: WAMessage,
+    envelope: proto.Message.ISecretEncryptedMessage,
+    groupsIgnore?: boolean,
+  ) {
+    const eventId = received.key.id;
+    const target = envelope.targetMessageKey;
+    const timestamp = Math.floor(Number(received.messageTimestamp));
+    if (!eventId || !target?.id || target.id === eventId || !Number.isFinite(timestamp)) return;
+    if (groupsIgnore && isJidGroup(received.key.remoteJid)) return;
+
+    const cacheKey = `${this.instanceId}:encrypted-edit:${eventId}`;
+    if (await this.baileysCache.get(cacheKey)) return;
+
+    const original = await this.getMessage(target, true);
+    if (!original || !('key' in original) || timestamp < Number(original.messageTimestamp)) return;
+
+    const protocol = decryptMessageEdit(envelope, received.key, original, this.client.user);
+    if (protocol) return { protocol, original, eventId, cacheKey };
   }
 
   private async defineAuthState() {
@@ -1205,16 +1228,28 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
+          const encryptedEdit = normalizeMessageContent(received.message)?.secretEncryptedMessage;
+          const isEncryptedEdit =
+            encryptedEdit?.secretEncType === proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT;
+          const resolvedEdit = isEncryptedEdit
+            ? await this.readEncryptedEdit(received, encryptedEdit, settings?.groupsIgnore)
+            : undefined;
+          if (isEncryptedEdit && !resolvedEdit) continue;
+
           const editedMessage =
-            received?.message?.protocolMessage || received?.message?.editedMessage?.message?.protocolMessage;
+            resolvedEdit?.protocol ||
+            received.message?.protocolMessage ||
+            received.message?.editedMessage?.message?.protocolMessage;
 
           if (editedMessage) {
-            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
-              this.chatwootService.eventWhatsapp(
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+              const notification = this.chatwootService.eventWhatsapp(
                 'messages.edit',
                 { instanceName: this.instance.name, instanceId: this.instance.id },
-                editedMessage,
+                resolvedEdit ? { ...editedMessage, editEventId: resolvedEdit.eventId } : editedMessage,
               );
+              if (resolvedEdit) await notification;
+            }
 
             await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
 
@@ -1222,17 +1257,24 @@ export class BaileysStartupService extends ChannelStartupService {
               await this.baileysCache.set(`protocol_${received.key.id}`, editedMessage.key.id, 60 * 60 * 24);
             }
 
-            const oldMessage = await this.getMessage(editedMessage.key, true);
-            if ((oldMessage as any)?.id) {
-              const editedMessageTimestamp = Long.isLong(received?.messageTimestamp)
-                ? Math.floor(received?.messageTimestamp.toNumber())
-                : Math.floor(received?.messageTimestamp as number);
-
+            const oldMessage = resolvedEdit?.original ?? (await this.getMessage(editedMessage.key, true));
+            if (oldMessage && 'id' in oldMessage && typeof oldMessage.id === 'string') {
+              const previousSecret =
+                'message' in oldMessage ? oldMessage.message?.messageContextInfo?.messageSecret : undefined;
+              const content =
+                editedMessage.editedMessage &&
+                proto.Message.toObject(proto.Message.create(editedMessage.editedMessage), {
+                  bytes: String,
+                  longs: String,
+                });
+              if (content && previousSecret) {
+                content.messageContextInfo = { ...content.messageContextInfo, messageSecret: previousSecret };
+              }
               await this.prismaRepository.message.update({
-                where: { id: (oldMessage as any).id },
+                where: { id: oldMessage.id },
                 data: {
-                  message: editedMessage.editedMessage as any,
-                  messageTimestamp: editedMessageTimestamp,
+                  message: content,
+                  messageTimestamp: Math.floor(Number(received.messageTimestamp)),
                   status: 'EDITED',
                 },
               });
@@ -1243,9 +1285,10 @@ export class BaileysStartupService extends ChannelStartupService {
                   remoteJid: editedMessage.key.remoteJid,
                   status: 'EDITED',
                   instanceId: this.instanceId,
-                  messageId: (oldMessage as any).id,
+                  messageId: oldMessage.id,
                 },
               });
+              if (resolvedEdit) await this.baileysCache.set(resolvedEdit.cacheKey, true, 60 * 60 * 24);
             }
           }
 
