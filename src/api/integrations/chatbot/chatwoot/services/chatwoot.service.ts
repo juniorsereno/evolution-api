@@ -2681,8 +2681,8 @@ export class ChatwootService {
               key,
               message: { extendedTextMessage: { contextInfo: { stanzaId: key.id } } },
             },
-            'WAID:' + body.key.id,
-            null,
+            'WAID:' + (body.editEventId ?? body.key.id),
+            body.editEventId ? message : null,
           );
           if (!send) {
             this.logger.warn('edited message not sent');
