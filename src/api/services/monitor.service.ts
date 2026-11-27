@@ -77,7 +77,7 @@ export class WAMonitoringService {
     }
   }
 
-  public async instanceInfo(instanceNames?: string[]): Promise<any> {
+  public async instanceInfo(instanceNames?: string[], omitToken = false): Promise<any> {
     if (instanceNames && instanceNames.length > 0) {
       const inexistentInstances = instanceNames ? instanceNames.filter((instance) => !this.waInstances[instance]) : [];
 
@@ -102,6 +102,7 @@ export class WAMonitoringService {
 
     const instances = await this.prismaRepository.instance.findMany({
       where,
+      omit: { token: omitToken },
       include: {
         Chatwoot: true,
         Proxy: true,
@@ -123,7 +124,7 @@ export class WAMonitoringService {
     return instances;
   }
 
-  public async instanceInfoById(instanceId?: string, number?: string) {
+  public async instanceInfoById(instanceId?: string, number?: string, omitToken = false) {
     let instanceName: string;
     if (instanceId) {
       instanceName = await this.prismaRepository.instance.findFirst({ where: { id: instanceId } }).then((r) => r?.name);
@@ -147,7 +148,7 @@ export class WAMonitoringService {
 
     const instanceNames = instanceName ? [instanceName] : null;
 
-    return this.instanceInfo(instanceNames);
+    return this.instanceInfo(instanceNames, omitToken);
   }
 
   public async cleaningUp(instanceName: string) {
