@@ -50,6 +50,21 @@ test('runtime retains global listing filters and token-scoped listing restrictio
   }
   assert.equal((await request('/instance/fetchInstances?instanceName='+names[1],keys[0])).status,401);
 });
+
+test('runtime applies the configured token visibility to every instance listing', async () => {
+  const expected = process.env.AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES === 'true';
+  for (const [path, key] of [
+    ['/instance/fetchInstances', globalKey],
+    ['/instance/fetchInstances?instanceName=' + names[0], globalKey],
+    ['/instance/fetchInstances?instanceId=' + ids[0], globalKey],
+    ['/instance/fetchInstances', keys[0]],
+  ]) {
+    const result = await request(path, key);
+    assert.equal(result.status, 200);
+    assert.ok(result.body.length > 0);
+    for (const instance of result.body) assert.equal(Object.hasOwn(instance, 'token'), expected);
+  }
+});
 test('runtime creates from the validated body while ignoring an alternate query name',async()=>{
   const response=await request('/instance/create?instanceName=synthetic-query-only',globalKey,{instanceName:names[2],integration:'WHATSAPP-BAILEYS',qrcode:false});
   assert.equal(response.status,201);assert.equal(response.body.instance.instanceName,names[2]);
